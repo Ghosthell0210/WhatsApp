@@ -20,16 +20,19 @@ export class TelegramManager {
   private store: BridgeStore;
   private onStateChange: (state: TelegramPublicState) => void;
   private onReplyReceived: (payload: TelegramReplyPayload) => Promise<{ ok: boolean; detail: string }>;
+  private onPairingRequest?: (phone: string) => Promise<string>;
   private chatIdDetectedListeners = new Set<(chatId: string) => void>();
 
   constructor(params: {
     store: BridgeStore;
     onStateChange: (state: TelegramPublicState) => void;
     onReplyReceived: (payload: TelegramReplyPayload) => Promise<{ ok: boolean; detail: string }>;
+    onPairingRequest?: (phone: string) => Promise<string>;
   }) {
     this.store = params.store;
     this.onStateChange = params.onStateChange;
     this.onReplyReceived = params.onReplyReceived;
+    this.onPairingRequest = params.onPairingRequest;
   }
 
   onChatIdDetected(listener: (chatId: string) => void): () => void {
@@ -101,6 +104,17 @@ export class TelegramManager {
 
         const text = ctx.message.text.trim();
         if (!text) return;
+
+        // 0. Check /codigo or /vincular command to request WhatsApp pairing code straight from Telegram
+        const pairMatch = text.match(/^\/(?:codigo|vincular)(?:@[A-Za-z0-9_]+)?(?:\s+(.+))?$/i);
+        if (pairMatch && this.onPairingRequest) {
+          const rawPhone = (pairMatch[1] ?? '').trim();
+          const replyText = await this.onPairingRequest(rawPhone);
+          await ctx.reply(replyText, {
+            reply_parameters: { message_id: ctx.message.message_id },
+          });
+          return;
+        }
 
         // 1. Check /reply or /responder command
         const cmd = parseTelegramReplyCommand(text);
@@ -233,6 +247,19 @@ export class TelegramManager {
         ok: false,
         error: err instanceof Error ? err.message : 'Error al enviar mensaje de prueba',
       };
+    }
+  }
+
+  async sendSystemNotice(text: string): Promise<boolean> {
+    const state = this.store.getTelegramState();
+    if (!this.bot || state.status !== 'connected' || !state.chatId) {
+      return false;
+    }
+    try {
+      await this.bot.api.sendMessage(state.chatId, text);
+      return true;
+    } catch {
+      return false;
     }
   }
 

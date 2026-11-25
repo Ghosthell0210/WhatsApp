@@ -54,7 +54,25 @@ export class WhatsAppManager {
   }
 
   hasSavedSession(): boolean {
-    return fs.existsSync(path.join(AUTH_DIR, 'creds.json'));
+    const credsPath = path.join(AUTH_DIR, 'creds.json');
+    if (!fs.existsSync(credsPath)) return false;
+    try {
+      const parsed = JSON.parse(fs.readFileSync(credsPath, 'utf8')) as {
+        registered?: boolean;
+        account?: unknown;
+      };
+      return Boolean(parsed.registered || parsed.account);
+    } catch {
+      return false;
+    }
+  }
+
+  private cleanupIncompleteAuthIfNeeded(): void {
+    const credsPath = path.join(AUTH_DIR, 'creds.json');
+    if (!fs.existsSync(credsPath)) return;
+    if (!this.hasSavedSession()) {
+      this.wipeAuthDir();
+    }
   }
 
   async connect(options?: WhatsAppConnectOptions): Promise<WhatsAppPublicState> {
@@ -99,8 +117,10 @@ export class WhatsAppManager {
     this.onStateChange(connectingState);
 
     try {
+      this.cleanupIncompleteAuthIfNeeded();
       fs.mkdirSync(AUTH_DIR, { recursive: true });
       const { state, saveCreds } = await useMultiFileAuthState(AUTH_DIR);
+      let pairingConfirmed = Boolean(state.creds.account || state.creds.registered);
       let version: [number, number, number] | undefined;
       try {
         const latest = await fetchLatestBaileysVersion();
@@ -113,7 +133,8 @@ export class WhatsAppManager {
         ...(version ? { version } : {}),
         auth: state,
         logger: pino({ level: 'silent' }),
-        browser: Browsers.macOS('Desktop'),
+        browser: Browsers.ubuntu('Chrome'),
+        qrTimeout: 90_000,
         syncFullHistory: false,
         printQRInTerminal: false,
         markOnlineOnConnect: false,
@@ -124,10 +145,13 @@ export class WhatsAppManager {
       sock.ev.on('creds.update', saveCreds);
 
       sock.ev.on('connection.update', async (update) => {
-        const { connection, lastDisconnect, qr } = update;
+        const { connection, lastDisconnect, qr, isNewLogin } = update;
+        if (isNewLogin) {
+          pairingConfirmed = true;
+        }
 
         if (qr) {
-          if (this.pendingPairingPhone && !state.creds.registered) {
+          if (this.pendingPairingPhone && !state.creds.registered && !pairingConfirmed) {
             if (!this.pairingCodeRequested) {
               this.pairingCodeRequested = true;
               try {
@@ -136,8 +160,9 @@ export class WhatsAppManager {
                 console.log('\n==================================================');
                 console.log(` [WhatsApp] CÓDIGO DE VINCULACIÓN (sin QR): ${formattedCode}`);
                 console.log('==================================================');
-                console.log('En tu teléfono abre WhatsApp -> Dispositivos vinculados ->');
-                console.log('Vincular dispositivo -> Vincular con número de teléfono e ingresa el código.\n');
+                console.log('En tu teléfono, toca la notificación de WhatsApp (o entra a');
+                console.log('Dispositivos vinculados -> Vincular dispositivo -> Vincular con número de teléfono)');
+                console.log('y escribe ese código en las 8 casillas.\n');
                 const next = this.store.setWhatsAppState({
                   status: 'pairing_code_ready',
                   qrDataUrl: null,
@@ -150,6 +175,7 @@ export class WhatsAppManager {
                   err instanceof Error
                     ? err.message
                     : 'No se pudo solicitar el código de vinculación.';
+                this.wipeAuthDir();
                 const next = this.store.setWhatsAppState({
                   status: 'error',
                   pairingCode: null,
@@ -158,7 +184,7 @@ export class WhatsAppManager {
                 this.onStateChange(next);
               }
             }
-          } else {
+          } else if (!this.pendingPairingPhone) {
             try {
               const [qrDataUrl, qrTerminal] = await Promise.all([
                 QRCode.toDataURL(qr, {
@@ -191,6 +217,7 @@ export class WhatsAppManager {
           this.isConnecting = false;
           this.pendingPairingPhone = null;
           this.pairingCodeRequested = false;
+          pairingConfirmed = true;
           const userJid = sock.user?.id ? jidNormalizedUser(sock.user.id) : null;
           const phone = userJid ? formatPhoneDisplay(userJid) : null;
           console.log(`[WhatsApp] Conectado correctamente (${phone || 'sesión activa'}).`);
@@ -216,6 +243,22 @@ export class WhatsAppManager {
             this.wipeAuthDir();
           }
 
+          // If pairing code expired before user entered it on phone, stop cleanly instead of silently changing code
+          if (!this.manualDisconnect && this.pairingCodeRequested && !pairingConfirmed && !state.creds.registered) {
+            this.wipeAuthDir();
+            this.pendingPairingPhone = null;
+            this.pairingCodeRequested = false;
+            console.log('[WhatsApp] El código de 8 dígitos expiró antes de ingresarlo. Escribe "codigo <numero>" para pedir otro.');
+            const next = this.store.setWhatsAppState({
+              status: 'error',
+              qrDataUrl: null,
+              pairingCode: null,
+              lastError: 'El código anterior expiró antes de confirmarse. Ingresa tu número otra vez para generar uno nuevo.',
+            });
+            this.onStateChange(next);
+            return;
+          }
+
           if (!this.manualDisconnect && !isLoggedOut && statusCode !== DisconnectReason.badSession) {
             const next = this.store.setWhatsAppState({
               status: 'connecting',
@@ -224,10 +267,9 @@ export class WhatsAppManager {
               lastError: 'Reconectando sesión de WhatsApp...',
             });
             this.onStateChange(next);
-            const retryPhone = this.pendingPairingPhone || undefined;
             this.reconnectTimer = setTimeout(() => {
-              void this.connect(retryPhone ? { pairingPhone: retryPhone } : undefined);
-            }, 3500);
+              void this.connect();
+            }, 3000);
           } else {
             this.pendingPairingPhone = null;
             this.pairingCodeRequested = false;

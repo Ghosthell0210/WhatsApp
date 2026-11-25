@@ -1,4 +1,4 @@
-import { formatPhoneDisplay, isPrivateWhatsAppJid } from './logic';
+import { formatPhoneDisplay, isPrivateWhatsAppJid, sanitizePairingPhoneNumber } from './logic';
 import type { BridgeStore } from './store';
 import { TelegramManager } from './telegramManager';
 import type { BridgePublicState, BridgeWsEvent, MediaKind, RoutingRules } from './types';
@@ -9,6 +9,7 @@ export class BridgeCoordinator {
   public readonly whatsapp: WhatsAppManager;
   public readonly telegram: TelegramManager;
   private listeners = new Set<(event: BridgeWsEvent) => void>();
+  private lastNotifiedPairingCode: string | null = null;
 
   constructor(store: BridgeStore) {
     this.store = store;
@@ -17,6 +18,18 @@ export class BridgeCoordinator {
       store,
       onStateChange: (waState) => {
         this.emit({ type: 'wa:status', payload: waState });
+        if (
+          waState.status === 'pairing_code_ready' &&
+          waState.pairingCode &&
+          waState.pairingCode !== this.lastNotifiedPairingCode
+        ) {
+          this.lastNotifiedPairingCode = waState.pairingCode;
+          void this.telegram.sendSystemNotice(
+            `Código de vinculación WhatsApp (sin QR):\n\n${waState.pairingCode}\n\n1. Toca la notificación que te envió WhatsApp (o entra a Dispositivos vinculados → Vincular dispositivo → Vincular con número de teléfono).\n2. Ingresa este código de 8 dígitos.`,
+          );
+        } else if (waState.status === 'connected' || waState.status === 'disconnected') {
+          this.lastNotifiedPairingCode = null;
+        }
       },
       onIncomingMessage: async (payload) => {
         await this.handleIncomingWhatsApp({
@@ -41,6 +54,17 @@ export class BridgeCoordinator {
           origin: 'telegram',
           telegramMessageId,
         });
+      },
+      onPairingRequest: async (rawPhone) => {
+        const cleanPhone = sanitizePairingPhoneNumber(rawPhone);
+        if (!cleanPhone) {
+          return 'Envía tu número con código de país (sin +). Ejemplo:\n/codigo 5491155551234';
+        }
+        if (this.store.getWhatsAppState().status === 'connected') {
+          return 'WhatsApp ya está vinculado y activo.';
+        }
+        void this.whatsapp.connect({ pairingPhone: cleanPhone });
+        return `Generando código de 8 dígitos para +${cleanPhone}... Te lo enviaré aquí en unos segundos.`;
       },
     });
   }
