@@ -1,0 +1,6 @@
+{
+  "name": "Puente WA-TG",
+  "description": "Puente en tiempo real entre WhatsApp y Telegram para recibir mensajes privados (PV) en Telegram y responder directamente.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
