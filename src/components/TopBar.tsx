@@ -1,11 +1,14 @@
 import { FlaskConical, Link2 } from 'lucide-react';
 import type { ActiveTab } from './Sidebar';
+import type { TelegramPublicState, WhatsAppPublicState } from '../bridge/types';
 
 interface TopBarProps {
   activeTab: ActiveTab;
   onSelectTab: (tab: ActiveTab) => void;
   onOpenTestModal: () => void;
   unreadTotal: number;
+  whatsapp?: WhatsAppPublicState;
+  telegram?: TelegramPublicState;
 }
 
 const TAB_TITLES: Record<ActiveTab, string> = {
@@ -14,7 +17,16 @@ const TAB_TITLES: Record<ActiveTab, string> = {
   rules: 'Reglas de filtrado y registro',
 };
 
-export function TopBar({ activeTab, onSelectTab, onOpenTestModal, unreadTotal }: TopBarProps) {
+export function TopBar({
+  activeTab,
+  onSelectTab,
+  onOpenTestModal,
+  unreadTotal,
+  whatsapp,
+  telegram,
+}: TopBarProps) {
+  const isWaConnected = whatsapp?.status === 'connected';
+  const isTgConnected = telegram?.status === 'connected';
   return (
     <header className="bg-white border-b border-slate-200 shrink-0">
       <div className="h-16 px-4 sm:px-6 flex items-center justify-between gap-6">
@@ -28,6 +40,33 @@ export function TopBar({ activeTab, onSelectTab, onOpenTestModal, unreadTotal }:
           <h1 className="hidden sm:block font-display text-base sm:text-lg font-semibold text-slate-900 truncate">
             {TAB_TITLES[activeTab]}
           </h1>
+          <div className="hidden xl:flex items-center gap-2 pl-3 border-l border-slate-200">
+            <span
+              className={`inline-flex items-center gap-1.5 px-2.5 py-1 text-xs font-medium rounded-full ${
+                isWaConnected
+                  ? 'bg-emerald-50 text-emerald-800 border border-emerald-200'
+                  : 'bg-slate-100 text-slate-600 border border-slate-200'
+              }`}
+            >
+              <span
+                className={`w-2 h-2 rounded-full ${isWaConnected ? 'bg-emerald-500 animate-pulse' : 'bg-slate-400'}`}
+              ></span>
+              <span>WhatsApp: {isWaConnected ? 'Vinculado' : 'Sin vincular'}</span>
+            </span>
+
+            <span
+              className={`inline-flex items-center gap-1.5 px-2.5 py-1 text-xs font-medium rounded-full ${
+                isTgConnected
+                  ? 'bg-sky-50 text-sky-800 border border-sky-200'
+                  : 'bg-slate-100 text-slate-600 border border-slate-200'
+              }`}
+            >
+              <span
+                className={`w-2 h-2 rounded-full ${isTgConnected ? 'bg-sky-500 animate-pulse' : 'bg-slate-400'}`}
+              ></span>
+              <span>Bot Telegram: {isTgConnected ? `@${telegram?.botUsername || 'activo'}` : 'Sin configurar'}</span>
+            </span>
+          </div>
         </div>
 
         <div className="flex items-center gap-2.5 shrink-0">

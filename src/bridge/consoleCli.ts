@@ -215,7 +215,8 @@ export class ConsoleSessionController {
   startInitialWizardIfNeeded(): boolean {
     const state = this.adapter.getPublicState();
     const hasTelegram =
-      state.telegram.status === 'connected' && state.telegram.hasToken && Boolean(state.telegram.chatId);
+      (state.telegram.status === 'connected' && state.telegram.hasToken) ||
+      Boolean(process.env.TELEGRAM_BOT_TOKEN?.trim());
 
     if (!hasTelegram) {
       this.startWizard();

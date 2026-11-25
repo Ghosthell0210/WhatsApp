@@ -108,7 +108,22 @@ export function Sidebar({
         <div className="space-y-2.5 text-xs">
           <div className="flex items-center justify-between gap-2">
             <span className="flex items-center gap-2 text-slate-700 font-medium">
-              <MessageSquare className="w-3.5 h-3.5 text-emerald-700 shrink-0" aria-hidden="true" />
+              <span className="relative flex h-2.5 w-2.5">
+                {whatsapp.status === 'connected' && (
+                  <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-emerald-400 opacity-75"></span>
+                )}
+                <span
+                  className={`relative inline-flex rounded-full h-2.5 w-2.5 ${
+                    whatsapp.status === 'connected'
+                      ? 'bg-emerald-500'
+                      : whatsapp.status === 'pairing_code_ready' || whatsapp.status === 'qr_ready' || whatsapp.status === 'connecting'
+                        ? 'bg-amber-500 animate-pulse'
+                        : whatsapp.status === 'error'
+                          ? 'bg-rose-500'
+                          : 'bg-slate-300'
+                  }`}
+                ></span>
+              </span>
               WhatsApp
             </span>
             <span className={`font-medium whitespace-nowrap ${waInfo.tone}`}>{waInfo.label}</span>
@@ -121,8 +136,23 @@ export function Sidebar({
 
           <div className="flex items-center justify-between gap-2 pt-1">
             <span className="flex items-center gap-2 text-slate-700 font-medium">
-              <Send className="w-3.5 h-3.5 text-sky-700 shrink-0" aria-hidden="true" />
-              Telegram
+              <span className="relative flex h-2.5 w-2.5">
+                {telegram.status === 'connected' && (
+                  <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-sky-400 opacity-75"></span>
+                )}
+                <span
+                  className={`relative inline-flex rounded-full h-2.5 w-2.5 ${
+                    telegram.status === 'connected'
+                      ? 'bg-sky-500'
+                      : telegram.status === 'connecting'
+                        ? 'bg-amber-500 animate-pulse'
+                        : telegram.status === 'error'
+                          ? 'bg-rose-500'
+                          : 'bg-slate-300'
+                  }`}
+                ></span>
+              </span>
+              Telegram Bot
             </span>
             <span className={`font-medium whitespace-nowrap ${tgInfo.tone}`}>{tgInfo.label}</span>
           </div>
@@ -132,7 +162,8 @@ export function Sidebar({
             </p>
           )}
           {paused && (
-            <p className="text-[11px] font-medium text-amber-700 pl-5 pt-0.5">
+            <p className="text-[11px] font-medium text-amber-700 pl-5 pt-0.5 flex items-center gap-1.5">
+              <span className="w-1.5 h-1.5 rounded-full bg-amber-500 animate-pulse"></span>
               Reenvío en pausa
             </p>
           )}

@@ -152,6 +152,9 @@ export class TelegramManager {
 
       bot.command(['start', 'id'], async (ctx) => {
         const detectedId = String(ctx.chat.id);
+        if (!this.store.getTelegramState().chatId) {
+          this.setChatId(detectedId);
+        }
         const updated = this.store.setTelegramState({
           lastDetectedChatId: detectedId,
         });
@@ -166,13 +169,19 @@ export class TelegramManager {
         }
 
         await ctx.reply(
-          `Puente WA-TG activo.\nTu Chat ID es: ${detectedId}\n\nCuando recibas un mensaje privado de WhatsApp aquí, simplemente usa "Responder" sobre ese mensaje para contestar por WhatsApp.`,
+          `Puente WA-TG activo.\nTu Chat ID es: ${detectedId} (autorizado automáticamente)\n\nCuando recibas un mensaje privado de WhatsApp aquí, simplemente usa "Responder" sobre ese mensaje para contestar por WhatsApp.`,
         );
       });
 
       bot.on('message:text', async (ctx) => {
         const incomingChatId = String(ctx.chat.id);
-        const currentTargetChatId = this.store.getTelegramState().chatId;
+        let currentTargetChatId = this.store.getTelegramState().chatId;
+
+        // Auto-authorize if chat ID is not yet defined
+        if (!currentTargetChatId) {
+          currentTargetChatId = incomingChatId;
+          this.setChatId(incomingChatId);
+        }
 
         // Always record last detected chat ID for convenience
         if (incomingChatId !== this.store.getTelegramState().lastDetectedChatId) {

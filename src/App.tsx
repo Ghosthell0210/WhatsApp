@@ -85,6 +85,8 @@ export default function App() {
           onSelectTab={setActiveTab}
           onOpenTestModal={() => setTestModalOpen(true)}
           unreadTotal={unreadTotal}
+          whatsapp={fallbackWa}
+          telegram={fallbackTg}
         />
 
         <main className="flex-1 p-4 sm:p-6 max-w-[1280px] w-full mx-auto">

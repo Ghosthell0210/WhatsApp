@@ -207,17 +207,17 @@ export class BridgeCoordinator {
     const bootToken = envToken || savedSession?.botToken || '';
     const bootChatId = envChatId || savedSession?.chatId || '';
 
-    if (bootToken && bootChatId) {
+    if (bootToken) {
       const tgState = await this.telegram.connect(bootToken, bootChatId);
       if (tgState.status === 'connected') {
         console.log(
-          `[Telegram] ${envToken ? 'Bot conectado desde variables de entorno' : 'Sesión guardada restaurada'} (@${tgState.botUsername}) -> Chat ID ${tgState.chatId}`,
+          `[Telegram] ${envToken ? 'Bot conectado desde variables de entorno' : 'Sesión guardada restaurada'} (@${tgState.botUsername}) -> Chat ID ${tgState.chatId || 'pendiente de auto-autorización al enviar /start'}`,
         );
       } else {
         console.log(`[Telegram] Error al conectar: ${tgState.lastError}`);
       }
     } else {
-      console.log('[Telegram] Sin configurar aún. Define TELEGRAM_BOT_TOKEN y TELEGRAM_CHAT_ID o escribe: tg <token> <chatId>');
+      console.log('[Telegram] Sin configurar aún. Define TELEGRAM_BOT_TOKEN o escribe: tg <token> <chatId>');
     }
 
     const pairingPhone = process.env.WA_PAIRING_PHONE?.trim() || undefined;
