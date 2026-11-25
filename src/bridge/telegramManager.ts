@@ -1,3 +1,5 @@
+import fs from 'node:fs';
+import path from 'node:path';
 import { Bot, InputFile } from 'grammy';
 import {
   formatTelegramForwardText,
@@ -6,9 +8,25 @@ import {
   maskToken,
   normalizePhoneToJid,
   parseTelegramReplyCommand,
+  TELEGRAM_PHOTO_MAX_BYTES,
 } from './logic';
 import type { BridgeStore } from './store';
 import type { TelegramPublicState, WhatsAppMediaPayload } from './types';
+
+const TG_SESSION_FILE = path.resolve(process.cwd(), 'data/tg-session.json');
+
+export const TELEGRAM_BOT_COMMANDS = [
+  { command: 'estado', description: 'Ver conexión, RAM y contadores' },
+  { command: 'pausar', description: 'Pausar reenvío de WhatsApp a Telegram' },
+  { command: 'reanudar', description: 'Reanudar reenvío de mensajes' },
+  { command: 'bloquear', description: 'Silenciar contacto (o responde a un mensaje)' },
+  { command: 'desbloquear', description: 'Quitar bloqueo de un contacto' },
+  { command: 'bloqueados', description: 'Listar contactos bloqueados' },
+  { command: 'responder', description: 'Enviar mensaje nuevo por WhatsApp' },
+  { command: 'codigo', description: 'Pedir código de 8 dígitos para WhatsApp' },
+  { command: 'ayuda', description: 'Ver todos los comandos disponibles' },
+  { command: 'start', description: 'Mostrar tu Chat ID y ayuda inicial' },
+];
 
 export interface TelegramReplyPayload {
   jid: string;
@@ -56,8 +74,58 @@ export class TelegramManager {
     };
   }
 
+  loadSavedSession(): { botToken: string; chatId: string } | null {
+    try {
+      if (!fs.existsSync(TG_SESSION_FILE)) return null;
+      const parsed = JSON.parse(fs.readFileSync(TG_SESSION_FILE, 'utf-8')) as {
+        botToken?: unknown;
+        chatId?: unknown;
+      };
+      if (
+        typeof parsed.botToken === 'string' &&
+        parsed.botToken.trim() &&
+        typeof parsed.chatId === 'string' &&
+        parsed.chatId.trim()
+      ) {
+        return { botToken: parsed.botToken.trim(), chatId: parsed.chatId.trim() };
+      }
+    } catch {
+      // Ignore corrupt session file
+    }
+    return null;
+  }
+
+  private saveSessionFile(botToken: string, chatId: string): void {
+    if (!botToken.trim() || !chatId.trim()) return;
+    try {
+      fs.mkdirSync(path.dirname(TG_SESSION_FILE), { recursive: true });
+      const tmp = `${TG_SESSION_FILE}.tmp`;
+      fs.writeFileSync(tmp, JSON.stringify({ botToken: botToken.trim(), chatId: chatId.trim() }), {
+        encoding: 'utf-8',
+        mode: 0o600,
+      });
+      fs.renameSync(tmp, TG_SESSION_FILE);
+    } catch {
+      // Ignore session write errors
+    }
+  }
+
+  private clearSessionFile(): void {
+    try {
+      if (fs.existsSync(TG_SESSION_FILE)) {
+        fs.rmSync(TG_SESSION_FILE, { force: true });
+      }
+    } catch {
+      // Ignore cleanup errors
+    }
+  }
+
   setChatId(chatId: string): TelegramPublicState {
-    const next = this.store.setTelegramState({ chatId: chatId.trim() });
+    const cleanChatId = chatId.trim();
+    const next = this.store.setTelegramState({ chatId: cleanChatId });
+    if (this.activeToken && cleanChatId) {
+      this.saveSessionFile(this.activeToken, cleanChatId);
+    }
     this.onStateChange(next);
     return next;
   }
@@ -80,6 +148,7 @@ export class TelegramManager {
     try {
       const bot = new Bot(trimmedToken);
       const me = await bot.api.getMe();
+      void bot.api.setMyCommands(TELEGRAM_BOT_COMMANDS).catch(() => {});
 
       bot.command(['start', 'id'], async (ctx) => {
         const detectedId = String(ctx.chat.id);
@@ -153,8 +222,18 @@ export class TelegramManager {
             } else if (cmdName === 'bloquear') {
               let target = arg;
               if (!target && ctx.message.reply_to_message) {
-                target =
-                  this.store.lookupJidByTelegramMessageId(ctx.message.reply_to_message.message_id) ?? '';
+                const replyMsg = ctx.message.reply_to_message;
+                target = this.store.lookupJidByTelegramMessageId(replyMsg.message_id) ?? '';
+                if (!target) {
+                  const quotedBody =
+                    ('text' in replyMsg && typeof replyMsg.text === 'string' && replyMsg.text) ||
+                    ('caption' in replyMsg && typeof replyMsg.caption === 'string' && replyMsg.caption) ||
+                    '';
+                  const match = quotedBody.match(/\((\+?\d{7,16})\)/);
+                  if (match?.[1]) {
+                    target = normalizePhoneToJid(match[1]) ?? '';
+                  }
+                }
               }
               ctrlRes = await this.onControlCommand({ type: 'block', targetJidOrPhone: target });
             } else if (cmdName === 'desbloquear') {
@@ -194,9 +273,13 @@ export class TelegramManager {
         if (replyTo) {
           let targetJid = this.store.lookupJidByTelegramMessageId(replyTo.message_id);
 
-          // Fallback: parse phone from quoted bot header if bot was restarted
-          if (!targetJid && 'text' in replyTo && typeof replyTo.text === 'string') {
-            const match = replyTo.text.match(/\((\+?\d{7,16})\)/);
+          // Fallback: parse phone from quoted bot header (text or media caption)
+          if (!targetJid) {
+            const quotedBody =
+              ('text' in replyTo && typeof replyTo.text === 'string' && replyTo.text) ||
+              ('caption' in replyTo && typeof replyTo.caption === 'string' && replyTo.caption) ||
+              '';
+            const match = quotedBody.match(/\((\+?\d{7,16})\)/);
             if (match?.[1]) {
               targetJid = normalizePhoneToJid(match[1]);
             }
@@ -247,6 +330,9 @@ export class TelegramManager {
         chatId: trimmedChatId,
         lastError: null,
       });
+      if (trimmedChatId) {
+        this.saveSessionFile(trimmedToken, trimmedChatId);
+      }
       this.onStateChange(connectedState);
       return connectedState;
     } catch (err) {
@@ -303,10 +389,13 @@ export class TelegramManager {
                 : media.kind === 'sticker'
                   ? 'sticker.webp'
                   : `archivo.${ext}`);
-        const inputFile = new InputFile(media.buffer, defaultName);
+        const inputFile = new InputFile(media.tempFilePath, defaultName);
 
         if (media.kind === 'image') {
-          const sent = await this.bot.api.sendPhoto(state.chatId, inputFile, { caption });
+          const sent =
+            media.byteLength > TELEGRAM_PHOTO_MAX_BYTES
+              ? await this.bot.api.sendDocument(state.chatId, inputFile, { caption })
+              : await this.bot.api.sendPhoto(state.chatId, inputFile, { caption });
           return { delivered: true, telegramMessageId: sent.message_id };
         }
         if (media.kind === 'audio') {
@@ -395,6 +484,7 @@ export class TelegramManager {
     }
     if (clearToken) {
       this.activeToken = '';
+      this.clearSessionFile();
     }
 
     const next = this.store.setTelegramState({

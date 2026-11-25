@@ -65,7 +65,7 @@ export interface RoutingRules {
 
 export interface WhatsAppMediaPayload {
   kind: 'image' | 'video' | 'audio' | 'document' | 'sticker';
-  buffer: Buffer;
+  tempFilePath: string;
   mimeType?: string;
   fileName?: string;
   ptt?: boolean;

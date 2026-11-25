@@ -203,12 +203,18 @@ export class BridgeCoordinator {
 
     const envToken = process.env.TELEGRAM_BOT_TOKEN?.trim() ?? '';
     const envChatId = process.env.TELEGRAM_CHAT_ID?.trim() ?? '';
-    if (envToken && envChatId) {
-      const tgState = await this.telegram.connect(envToken, envChatId);
+    const savedSession = !envToken ? this.telegram.loadSavedSession() : null;
+    const bootToken = envToken || savedSession?.botToken || '';
+    const bootChatId = envChatId || savedSession?.chatId || '';
+
+    if (bootToken && bootChatId) {
+      const tgState = await this.telegram.connect(bootToken, bootChatId);
       if (tgState.status === 'connected') {
-        console.log(`[Telegram] Bot conectado desde variables de entorno (@${tgState.botUsername}) -> Chat ID ${tgState.chatId}`);
+        console.log(
+          `[Telegram] ${envToken ? 'Bot conectado desde variables de entorno' : 'Sesión guardada restaurada'} (@${tgState.botUsername}) -> Chat ID ${tgState.chatId}`,
+        );
       } else {
-        console.log(`[Telegram] Error al conectar desde entorno: ${tgState.lastError}`);
+        console.log(`[Telegram] Error al conectar: ${tgState.lastError}`);
       }
     } else {
       console.log('[Telegram] Sin configurar aún. Define TELEGRAM_BOT_TOKEN y TELEGRAM_CHAT_ID o escribe: tg <token> <chatId>');
@@ -220,6 +226,7 @@ export class BridgeCoordinator {
     if (this.whatsapp.hasSavedSession()) {
       console.log('[WhatsApp] Sesión guardada detectada. Reconectando automáticamente...');
       await this.whatsapp.connect();
+      await this.whatsapp.waitUntilSettled(3500);
     } else if (pairingPhone) {
       console.log(`[WhatsApp] Solicitando código de vinculación (sin QR) para +${pairingPhone}...`);
       await this.whatsapp.connect({ pairingPhone });

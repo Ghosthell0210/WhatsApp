@@ -49,6 +49,7 @@ export interface ConsoleBridgeAdapter {
   onTelegramChatIdDetected: (listener: (chatId: string) => void) => () => void;
   connectWhatsApp: (options?: { pairingPhone?: string }) => Promise<unknown>;
   disconnectWhatsApp: (logout: boolean) => Promise<unknown>;
+  hasSavedWhatsAppSession?: () => boolean;
   updateRules: (partial: Partial<RoutingRules>) => RoutingRules;
   sendOutboundReply: (params: {
     jid: string;
@@ -221,7 +222,9 @@ export class ConsoleSessionController {
       return true;
     }
 
-    if (state.whatsapp.status === 'disconnected') {
+    const hasWaSession =
+      state.whatsapp.status !== 'disconnected' || Boolean(this.adapter.hasSavedWhatsAppSession?.());
+    if (!hasWaSession) {
       this.step = 'awaiting_wa_phone';
       this.log('\n==================================================');
       this.log(' Vincular WhatsApp por código (sin QR)');
@@ -337,7 +340,7 @@ export class ConsoleSessionController {
       );
 
       const waStatus = this.adapter.getPublicState().whatsapp.status;
-      if (waStatus === 'connected') {
+      if (waStatus === 'connected' || waStatus === 'connecting' || this.adapter.hasSavedWhatsAppSession?.()) {
         this.finishWizard();
         return;
       }

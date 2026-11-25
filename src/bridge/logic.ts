@@ -1,6 +1,8 @@
 import type { MediaKind, RoutingRules } from './types';
 
-export const MAX_MEDIA_BYTES = 25 * 1024 * 1024; // 25 MB RAM safety cap
+export const MAX_MEDIA_BYTES = 50 * 1024 * 1024; // 50 MB Telegram Bot API upload limit
+export const TELEGRAM_PHOTO_MAX_BYTES = 10 * 1024 * 1024; // 10 MB Telegram sendPhoto limit
+export const MAX_TEMP_DISK_BYTES = 350 * 1024 * 1024; // 350 MB safety cap under ~400 MB free disk
 
 export interface JidCheckResult {
   allowed: boolean;

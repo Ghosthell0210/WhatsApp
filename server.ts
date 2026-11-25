@@ -7,6 +7,7 @@ import { WebSocketServer, WebSocket } from 'ws';
 import { BridgeStore } from './src/bridge/store';
 import { BridgeCoordinator } from './src/bridge/coordinator';
 import { attachConsoleInterface } from './src/bridge/consoleCli';
+import { cleanupTempMediaDir } from './src/bridge/whatsappManager';
 import {
   normalizePhoneToJid,
   sanitizePairingPhoneNumber,
@@ -268,6 +269,7 @@ async function startServer() {
       onTelegramChatIdDetected: (listener) => coordinator.telegram.onChatIdDetected(listener),
       connectWhatsApp: (options) => coordinator.whatsapp.connect(options),
       disconnectWhatsApp: (logout) => coordinator.whatsapp.disconnect(logout),
+      hasSavedWhatsAppSession: () => coordinator.whatsapp.hasSavedSession(),
       updateRules: (partial) => coordinator.updateRules(partial),
       sendOutboundReply: (params) => coordinator.sendOutboundReply(params),
     });
@@ -283,6 +285,7 @@ async function startServer() {
   const gracefulShutdown = (signal: string) => {
     console.log(`[Puente WA-TG] Señal ${signal} recibida, guardando historial en disco...`);
     store.flushToDisk();
+    cleanupTempMediaDir();
     server.close(() => {
       process.exit(0);
     });

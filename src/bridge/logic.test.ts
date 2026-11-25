@@ -15,6 +15,9 @@ import {
   maskToken,
   sanitizePairingPhoneNumber,
   formatPairingCode,
+  MAX_MEDIA_BYTES,
+  TELEGRAM_PHOTO_MAX_BYTES,
+  MAX_TEMP_DISK_BYTES,
 } from './logic';
 import type { RoutingRules } from './types';
 
@@ -122,6 +125,9 @@ test('extractMediaMetadata and formatByteSize inspect media messages accurately'
   });
   assert.equal(formatByteSize(1572864), '1.5 MB');
   assert.equal(formatByteSize(420_000), '410 KB');
+  assert.equal(MAX_MEDIA_BYTES, 50 * 1024 * 1024);
+  assert.equal(TELEGRAM_PHOTO_MAX_BYTES, 10 * 1024 * 1024);
+  assert.equal(MAX_TEMP_DISK_BYTES, 350 * 1024 * 1024);
 });
 
 test('formatTelegramForwardText and formatTelegramMediaCaption format bounded captions', () => {

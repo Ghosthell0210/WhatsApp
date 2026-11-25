@@ -1,3 +1,4 @@
+import crypto from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
 import pino from 'pino';
@@ -9,6 +10,7 @@ import makeWASocket, {
   fetchLatestBaileysVersion,
   jidNormalizedUser,
   useMultiFileAuthState,
+  type WAMessage,
   type WASocket,
 } from '@whiskeysockets/baileys';
 import {
@@ -18,12 +20,39 @@ import {
   formatPairingCode,
   formatPhoneDisplay,
   MAX_MEDIA_BYTES,
+  MAX_TEMP_DISK_BYTES,
   sanitizePairingPhoneNumber,
 } from './logic';
 import type { BridgeStore } from './store';
 import type { MediaKind, WhatsAppMediaPayload, WhatsAppPublicState } from './types';
 
 const AUTH_DIR = path.resolve(process.cwd(), 'data/wa-auth');
+export const TMP_MEDIA_DIR = path.resolve(process.cwd(), 'data/tmp-media');
+
+function getDirTotalBytes(dir: string): number {
+  if (!fs.existsSync(dir)) return 0;
+  let total = 0;
+  for (const name of fs.readdirSync(dir)) {
+    try {
+      const st = fs.statSync(path.join(dir, name));
+      if (st.isFile()) total += st.size;
+    } catch {
+      // Ignore files deleted concurrently
+    }
+  }
+  return total;
+}
+
+export function cleanupTempMediaDir(): void {
+  try {
+    if (!fs.existsSync(TMP_MEDIA_DIR)) return;
+    for (const name of fs.readdirSync(TMP_MEDIA_DIR)) {
+      fs.rmSync(path.join(TMP_MEDIA_DIR, name), { recursive: true, force: true });
+    }
+  } catch {
+    // Ignore cleanup errors
+  }
+}
 
 export interface WhatsAppInboundPayload {
   jid: string;
@@ -47,6 +76,7 @@ export class WhatsAppManager {
   private store: BridgeStore;
   private onStateChange: (state: WhatsAppPublicState) => void;
   private onIncomingMessage: (payload: WhatsAppInboundPayload) => Promise<void>;
+  private settleWaiters = new Set<() => void>();
 
   constructor(params: {
     store: BridgeStore;
@@ -56,6 +86,31 @@ export class WhatsAppManager {
     this.store = params.store;
     this.onStateChange = params.onStateChange;
     this.onIncomingMessage = params.onIncomingMessage;
+    cleanupTempMediaDir();
+  }
+
+  private notifyState(state: WhatsAppPublicState): void {
+    this.onStateChange(state);
+    if (state.status !== 'connecting') {
+      for (const resolve of this.settleWaiters) {
+        resolve();
+      }
+      this.settleWaiters.clear();
+    }
+  }
+
+  async waitUntilSettled(timeoutMs = 3500): Promise<void> {
+    if (this.store.getWhatsAppState().status !== 'connecting') return;
+    await new Promise<void>((resolve) => {
+      const done = () => {
+        clearTimeout(timer);
+        this.settleWaiters.delete(done);
+        resolve();
+      };
+      const timer = setTimeout(done, timeoutMs);
+      if (typeof timer.unref === 'function') timer.unref();
+      this.settleWaiters.add(done);
+    });
   }
 
   hasSavedSession(): boolean {
@@ -174,7 +229,7 @@ export class WhatsAppManager {
                   pairingCode: formattedCode,
                   lastError: null,
                 });
-                this.onStateChange(next);
+                this.notifyState(next);
               } catch (err) {
                 const msg =
                   err instanceof Error
@@ -186,7 +241,7 @@ export class WhatsAppManager {
                   pairingCode: null,
                   lastError: msg,
                 });
-                this.onStateChange(next);
+                this.notifyState(next);
               }
             }
           } else if (!this.pendingPairingPhone) {
@@ -207,13 +262,13 @@ export class WhatsAppManager {
                 pairingCode: null,
                 lastError: null,
               });
-              this.onStateChange(next);
+              this.notifyState(next);
             } catch {
               const next = this.store.setWhatsAppState({
                 status: 'error',
                 lastError: 'No se pudo generar la imagen del código QR.',
               });
-              this.onStateChange(next);
+              this.notifyState(next);
             }
           }
         }
@@ -234,7 +289,7 @@ export class WhatsAppManager {
             connectedName: sock.user?.name || 'WhatsApp vinculado',
             lastError: null,
           });
-          this.onStateChange(next);
+          this.notifyState(next);
         }
 
         if (connection === 'close') {
@@ -260,7 +315,7 @@ export class WhatsAppManager {
               pairingCode: null,
               lastError: 'El código anterior expiró antes de confirmarse. Ingresa tu número otra vez para generar uno nuevo.',
             });
-            this.onStateChange(next);
+            this.notifyState(next);
             return;
           }
 
@@ -271,7 +326,7 @@ export class WhatsAppManager {
               pairingCode: null,
               lastError: 'Reconectando sesión de WhatsApp...',
             });
-            this.onStateChange(next);
+            this.notifyState(next);
             this.reconnectTimer = setTimeout(() => {
               void this.connect();
             }, 3000);
@@ -288,7 +343,7 @@ export class WhatsAppManager {
                 ? 'La sesión se cerró desde el teléfono. Genera un nuevo código o QR para vincular.'
                 : null,
             });
-            this.onStateChange(next);
+            this.notifyState(next);
           }
         }
       });
@@ -310,49 +365,68 @@ export class WhatsAppManager {
           const mediaMeta = extractMediaMetadata(messageObj);
 
           if (mediaMeta) {
+            const activeTempBytes = getDirTotalBytes(TMP_MEDIA_DIR);
             if (mediaMeta.fileLength && mediaMeta.fileLength > MAX_MEDIA_BYTES) {
-              finalText = `${extracted.text} (${formatByteSize(mediaMeta.fileLength)} · omitido por límite de 25 MB)`;
+              finalText = `${extracted.text} (${formatByteSize(mediaMeta.fileLength)} · omitido por límite de 50 MB de Telegram)`;
+            } else if (activeTempBytes + (mediaMeta.fileLength ?? 0) > MAX_TEMP_DISK_BYTES) {
+              finalText = `${extracted.text} (omitido por límite temporal de disco)`;
             } else {
+              const ext = (mediaMeta.mimeType?.split('/')[1]?.split(';')[0] || 'bin').replace(
+                /[^a-zA-Z0-9]/g,
+                '',
+              ) || 'bin';
+              fs.mkdirSync(TMP_MEDIA_DIR, { recursive: true });
+              const tempFilePath = path.join(TMP_MEDIA_DIR, `${Date.now()}-${crypto.randomUUID()}.${ext}`);
+
               try {
-                const downloaded = await downloadMediaMessage(
+                const byteLength = await this.streamMediaToTempFile(
                   msg,
-                  'buffer',
-                  {},
-                  {
-                    logger: pino({ level: 'silent' }),
-                    reuploadRequest: sock.updateMediaMessage,
-                  },
+                  sock,
+                  tempFilePath,
+                  activeTempBytes,
                 );
-                if (Buffer.isBuffer(downloaded) && downloaded.byteLength > 0) {
-                  if (downloaded.byteLength <= MAX_MEDIA_BYTES) {
-                    mediaPayload = {
-                      kind: mediaMeta.kind,
-                      buffer: downloaded,
-                      mimeType: mediaMeta.mimeType,
-                      fileName: mediaMeta.fileName,
-                      ptt: mediaMeta.ptt,
-                      caption: mediaMeta.caption,
-                      byteLength: downloaded.byteLength,
-                    };
-                    finalText = `${extracted.text} (${formatByteSize(downloaded.byteLength)})`;
-                  } else {
-                    finalText = `${extracted.text} (${formatByteSize(downloaded.byteLength)} · omitido por límite de 25 MB)`;
-                  }
+                if (byteLength > 0) {
+                  mediaPayload = {
+                    kind: mediaMeta.kind,
+                    tempFilePath,
+                    mimeType: mediaMeta.mimeType,
+                    fileName: mediaMeta.fileName,
+                    ptt: mediaMeta.ptt,
+                    caption: mediaMeta.caption,
+                    byteLength,
+                  };
+                  finalText = `${extracted.text} (${formatByteSize(byteLength)})`;
+                } else {
+                  fs.rmSync(tempFilePath, { force: true });
                 }
-              } catch {
-                finalText = `${extracted.text} (no se pudo descargar el archivo)`;
+              } catch (err) {
+                fs.rmSync(tempFilePath, { force: true });
+                const reason = err instanceof Error ? err.message : '';
+                if (reason === 'FILE_TOO_LARGE') {
+                  finalText = `${extracted.text} (omitido por límite de 50 MB de Telegram)`;
+                } else if (reason === 'TEMP_DISK_FULL') {
+                  finalText = `${extracted.text} (omitido por límite temporal de disco)`;
+                } else {
+                  finalText = `${extracted.text} (no se pudo descargar el archivo)`;
+                }
               }
             }
           }
 
           const senderName = msg.pushName?.trim() || formatPhoneDisplay(normalizedJid);
-          await this.onIncomingMessage({
-            jid: normalizedJid,
-            senderName,
-            text: finalText,
-            mediaType: extracted.mediaType,
-            media: mediaPayload,
-          });
+          try {
+            await this.onIncomingMessage({
+              jid: normalizedJid,
+              senderName,
+              text: finalText,
+              mediaType: extracted.mediaType,
+              media: mediaPayload,
+            });
+          } finally {
+            if (mediaPayload?.tempFilePath) {
+              fs.rmSync(mediaPayload.tempFilePath, { force: true });
+            }
+          }
         }
       });
 
@@ -367,9 +441,74 @@ export class WhatsAppManager {
         pairingCode: null,
         lastError: errMsg,
       });
-      this.onStateChange(next);
+      this.notifyState(next);
       return next;
     }
+  }
+
+  private async streamMediaToTempFile(
+    msg: WAMessage,
+    sock: WASocket,
+    tempFilePath: string,
+    activeTempBytes: number,
+  ): Promise<number> {
+    const stream = await downloadMediaMessage(
+      msg,
+      'stream',
+      {},
+      {
+        logger: pino({ level: 'silent' }),
+        reuploadRequest: sock.updateMediaMessage,
+      },
+    );
+
+    return new Promise<number>((resolve, reject) => {
+      let bytesWritten = 0;
+      let settled = false;
+      const writer = fs.createWriteStream(tempFilePath);
+
+      const fail = (err: Error) => {
+        if (settled) return;
+        settled = true;
+        stream.destroy();
+        writer.destroy();
+        fs.rmSync(tempFilePath, { force: true });
+        reject(err);
+      };
+
+      stream.on('data', (chunk: Buffer) => {
+        bytesWritten += chunk.byteLength;
+        if (bytesWritten > MAX_MEDIA_BYTES) {
+          fail(new Error('FILE_TOO_LARGE'));
+          return;
+        }
+        if (activeTempBytes + bytesWritten > MAX_TEMP_DISK_BYTES) {
+          fail(new Error('TEMP_DISK_FULL'));
+          return;
+        }
+        if (!writer.write(chunk)) {
+          stream.pause();
+        }
+      });
+
+      writer.on('drain', () => {
+        stream.resume();
+      });
+
+      stream.on('end', () => {
+        writer.end();
+      });
+
+      writer.on('finish', () => {
+        if (!settled) {
+          settled = true;
+          resolve(bytesWritten);
+        }
+      });
+
+      stream.on('error', (err) => fail(err instanceof Error ? err : new Error('STREAM_ERROR')));
+      writer.on('error', (err) => fail(err instanceof Error ? err : new Error('WRITE_ERROR')));
+    });
   }
 
   async sendTextMessage(jid: string, text: string): Promise<{ sentOverNetwork: boolean }> {
