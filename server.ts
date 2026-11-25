@@ -4,7 +4,6 @@ import fs from 'node:fs';
 import http from 'node:http';
 import path from 'node:path';
 import { WebSocketServer, WebSocket } from 'ws';
-import { createServer as createViteServer } from 'vite';
 import { BridgeStore } from './src/bridge/store';
 import { BridgeCoordinator } from './src/bridge/coordinator';
 import { attachConsoleInterface } from './src/bridge/consoleCli';
@@ -200,13 +199,18 @@ async function startServer() {
   const distDir = path.resolve(process.cwd(), 'dist');
   const hasDistBuild = fs.existsSync(path.join(distDir, 'index.html'));
   const isProd = process.env.NODE_ENV === 'production';
+  const isConsoleOnly =
+    process.argv.includes('--console') ||
+    process.env.HEADLESS === 'true' ||
+    Boolean(process.env.P_SERVER_UUID);
 
-  if (isProd && hasDistBuild) {
+  if ((isProd || isConsoleOnly) && hasDistBuild) {
     app.use(express.static(distDir));
     app.get('*', (_req, res) => {
       res.sendFile(path.join(distDir, 'index.html'));
     });
-  } else if (!isProd) {
+  } else if (!isProd && !isConsoleOnly) {
+    const { createServer: createViteServer } = await import('vite');
     const vite = await createViteServer({
       server: { middlewareMode: true },
       appType: 'spa',
