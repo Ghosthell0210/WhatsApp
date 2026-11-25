@@ -10,7 +10,12 @@ import makeWASocket, {
   useMultiFileAuthState,
   type WASocket,
 } from '@whiskeysockets/baileys';
-import { extractWhatsAppMessageText, formatPhoneDisplay } from './logic';
+import {
+  extractWhatsAppMessageText,
+  formatPairingCode,
+  formatPhoneDisplay,
+  sanitizePairingPhoneNumber,
+} from './logic';
 import type { BridgeStore } from './store';
 import type { MediaKind, WhatsAppPublicState } from './types';
 
@@ -23,10 +28,16 @@ export interface WhatsAppInboundPayload {
   mediaType: MediaKind;
 }
 
+export interface WhatsAppConnectOptions {
+  pairingPhone?: string;
+}
+
 export class WhatsAppManager {
   private sock: WASocket | null = null;
   private manualDisconnect = false;
   private isConnecting = false;
+  private pendingPairingPhone: string | null = null;
+  private pairingCodeRequested = false;
   private reconnectTimer: ReturnType<typeof setTimeout> | null = null;
   private store: BridgeStore;
   private onStateChange: (state: WhatsAppPublicState) => void;
@@ -46,18 +57,43 @@ export class WhatsAppManager {
     return fs.existsSync(path.join(AUTH_DIR, 'creds.json'));
   }
 
-  async connect(): Promise<WhatsAppPublicState> {
+  async connect(options?: WhatsAppConnectOptions): Promise<WhatsAppPublicState> {
+    const requestedPhone = options?.pairingPhone
+      ? sanitizePairingPhoneNumber(options.pairingPhone)
+      : null;
+
+    if (options?.pairingPhone && !requestedPhone) {
+      const errState = this.store.setWhatsAppState({
+        status: 'error',
+        lastError: 'Número inválido. Usa código de país sin + (ej. 5491155551234).',
+      });
+      this.onStateChange(errState);
+      return errState;
+    }
+
+    // If user switches pairing method while awaiting QR/code, reset unauthenticated socket cleanly
+    if ((this.isConnecting || this.sock) && this.store.getWhatsAppState().status !== 'connected') {
+      if (requestedPhone !== this.pendingPairingPhone) {
+        await this.disconnect(false);
+      } else {
+        return this.store.getWhatsAppState();
+      }
+    }
+
     if (this.isConnecting || this.sock) {
       return this.store.getWhatsAppState();
     }
 
     this.manualDisconnect = false;
     this.isConnecting = true;
+    this.pendingPairingPhone = requestedPhone;
+    this.pairingCodeRequested = false;
     this.clearReconnectTimer();
 
     const connectingState = this.store.setWhatsAppState({
       status: 'connecting',
       qrDataUrl: null,
+      pairingCode: null,
       lastError: null,
     });
     this.onStateChange(connectingState);
@@ -91,40 +127,77 @@ export class WhatsAppManager {
         const { connection, lastDisconnect, qr } = update;
 
         if (qr) {
-          try {
-            const [qrDataUrl, qrTerminal] = await Promise.all([
-              QRCode.toDataURL(qr, {
-                width: 280,
-                margin: 2,
-                color: { dark: '#0f172a', light: '#ffffff' },
-              }),
-              QRCode.toString(qr, { type: 'terminal', small: true }),
-            ]);
-            console.log('\n[WhatsApp] Escanea este código QR desde WhatsApp -> Dispositivos vinculados:');
-            console.log(qrTerminal);
-            const next = this.store.setWhatsAppState({
-              status: 'qr_ready',
-              qrDataUrl,
-              lastError: null,
-            });
-            this.onStateChange(next);
-          } catch {
-            const next = this.store.setWhatsAppState({
-              status: 'error',
-              lastError: 'No se pudo generar la imagen del código QR.',
-            });
-            this.onStateChange(next);
+          if (this.pendingPairingPhone && !state.creds.registered) {
+            if (!this.pairingCodeRequested) {
+              this.pairingCodeRequested = true;
+              try {
+                const rawCode = await sock.requestPairingCode(this.pendingPairingPhone);
+                const formattedCode = formatPairingCode(rawCode);
+                console.log('\n==================================================');
+                console.log(` [WhatsApp] CÓDIGO DE VINCULACIÓN (sin QR): ${formattedCode}`);
+                console.log('==================================================');
+                console.log('En tu teléfono abre WhatsApp -> Dispositivos vinculados ->');
+                console.log('Vincular dispositivo -> Vincular con número de teléfono e ingresa el código.\n');
+                const next = this.store.setWhatsAppState({
+                  status: 'pairing_code_ready',
+                  qrDataUrl: null,
+                  pairingCode: formattedCode,
+                  lastError: null,
+                });
+                this.onStateChange(next);
+              } catch (err) {
+                const msg =
+                  err instanceof Error
+                    ? err.message
+                    : 'No se pudo solicitar el código de vinculación.';
+                const next = this.store.setWhatsAppState({
+                  status: 'error',
+                  pairingCode: null,
+                  lastError: msg,
+                });
+                this.onStateChange(next);
+              }
+            }
+          } else {
+            try {
+              const [qrDataUrl, qrTerminal] = await Promise.all([
+                QRCode.toDataURL(qr, {
+                  width: 280,
+                  margin: 2,
+                  color: { dark: '#0f172a', light: '#ffffff' },
+                }),
+                QRCode.toString(qr, { type: 'terminal', small: true }),
+              ]);
+              console.log('\n[WhatsApp] Escanea este código QR desde WhatsApp -> Dispositivos vinculados:');
+              console.log(qrTerminal);
+              const next = this.store.setWhatsAppState({
+                status: 'qr_ready',
+                qrDataUrl,
+                pairingCode: null,
+                lastError: null,
+              });
+              this.onStateChange(next);
+            } catch {
+              const next = this.store.setWhatsAppState({
+                status: 'error',
+                lastError: 'No se pudo generar la imagen del código QR.',
+              });
+              this.onStateChange(next);
+            }
           }
         }
 
         if (connection === 'open') {
           this.isConnecting = false;
+          this.pendingPairingPhone = null;
+          this.pairingCodeRequested = false;
           const userJid = sock.user?.id ? jidNormalizedUser(sock.user.id) : null;
           const phone = userJid ? formatPhoneDisplay(userJid) : null;
           console.log(`[WhatsApp] Conectado correctamente (${phone || 'sesión activa'}).`);
           const next = this.store.setWhatsAppState({
             status: 'connected',
             qrDataUrl: null,
+            pairingCode: null,
             connectedPhone: phone,
             connectedName: sock.user?.name || 'WhatsApp vinculado',
             lastError: null,
@@ -147,20 +220,25 @@ export class WhatsAppManager {
             const next = this.store.setWhatsAppState({
               status: 'connecting',
               qrDataUrl: null,
+              pairingCode: null,
               lastError: 'Reconectando sesión de WhatsApp...',
             });
             this.onStateChange(next);
+            const retryPhone = this.pendingPairingPhone || undefined;
             this.reconnectTimer = setTimeout(() => {
-              void this.connect();
+              void this.connect(retryPhone ? { pairingPhone: retryPhone } : undefined);
             }, 3500);
           } else {
+            this.pendingPairingPhone = null;
+            this.pairingCodeRequested = false;
             const next = this.store.setWhatsAppState({
               status: 'disconnected',
               qrDataUrl: null,
+              pairingCode: null,
               connectedPhone: null,
               connectedName: null,
               lastError: isLoggedOut
-                ? 'La sesión se cerró desde el teléfono. Genera un nuevo QR para vincular.'
+                ? 'La sesión se cerró desde el teléfono. Genera un nuevo código o QR para vincular.'
                 : null,
             });
             this.onStateChange(next);
@@ -197,6 +275,7 @@ export class WhatsAppManager {
       const next = this.store.setWhatsAppState({
         status: 'error',
         qrDataUrl: null,
+        pairingCode: null,
         lastError: errMsg,
       });
       this.onStateChange(next);
@@ -215,6 +294,8 @@ export class WhatsAppManager {
   async disconnect(logout: boolean): Promise<WhatsAppPublicState> {
     this.manualDisconnect = true;
     this.isConnecting = false;
+    this.pendingPairingPhone = null;
+    this.pairingCodeRequested = false;
     this.clearReconnectTimer();
 
     if (this.sock) {
@@ -237,6 +318,7 @@ export class WhatsAppManager {
     const next = this.store.setWhatsAppState({
       status: 'disconnected',
       qrDataUrl: null,
+      pairingCode: null,
       connectedPhone: null,
       connectedName: null,
       lastError: null,

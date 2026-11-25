@@ -7,7 +7,11 @@ import { WebSocketServer, WebSocket } from 'ws';
 import { BridgeStore } from './src/bridge/store';
 import { BridgeCoordinator } from './src/bridge/coordinator';
 import { attachConsoleInterface } from './src/bridge/consoleCli';
-import { normalizePhoneToJid, validateTelegramConfigInput } from './src/bridge/logic';
+import {
+  normalizePhoneToJid,
+  sanitizePairingPhoneNumber,
+  validateTelegramConfigInput,
+} from './src/bridge/logic';
 import type { BridgeWsEvent } from './src/bridge/types';
 
 async function startServer() {
@@ -85,7 +89,22 @@ async function startServer() {
     res.json(result);
   });
 
-  app.post('/api/whatsapp/connect', async (_req, res) => {
+  app.post('/api/whatsapp/connect', async (req, res) => {
+    const rawPhone = typeof req.body?.pairingPhone === 'string' ? req.body.pairingPhone.trim() : '';
+    if (rawPhone) {
+      const cleanPhone = sanitizePairingPhoneNumber(rawPhone);
+      if (!cleanPhone) {
+        res.status(400).json({
+          ok: false,
+          message: 'Número inválido. Usa código de país sin + (ej. 5491155551234).',
+        });
+        return;
+      }
+      const waState = await coordinator.whatsapp.connect({ pairingPhone: cleanPhone });
+      res.json({ ok: true, whatsapp: waState });
+      return;
+    }
+
     const waState = await coordinator.whatsapp.connect();
     res.json({ ok: true, whatsapp: waState });
   });
@@ -238,7 +257,7 @@ async function startServer() {
         coordinator.telegram.setChatId(chatId);
       },
       onTelegramChatIdDetected: (listener) => coordinator.telegram.onChatIdDetected(listener),
-      connectWhatsApp: () => coordinator.whatsapp.connect(),
+      connectWhatsApp: (options) => coordinator.whatsapp.connect(options),
       disconnectWhatsApp: (logout) => coordinator.whatsapp.disconnect(logout),
       updateRules: (partial) => coordinator.updateRules(partial),
       sendOutboundReply: (params) => coordinator.sendOutboundReply(params),

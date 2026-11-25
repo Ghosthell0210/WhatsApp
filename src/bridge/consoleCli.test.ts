@@ -39,6 +39,7 @@ function createMockAdapter(overrides?: {
       whatsapp: {
         status: overrides?.whatsappConnected ? 'connected' : 'disconnected',
         qrDataUrl: null,
+        pairingCode: null,
         connectedPhone: null,
         connectedName: null,
         lastError: null,
@@ -81,8 +82,8 @@ function createMockAdapter(overrides?: {
         chatIdListener = null;
       };
     },
-    connectWhatsApp: async () => {
-      calls.push({ fn: 'connectWhatsApp', args: [] });
+    connectWhatsApp: async (options) => {
+      calls.push({ fn: 'connectWhatsApp', args: [options] });
     },
     disconnectWhatsApp: async (logout) => {
       calls.push({ fn: 'disconnectWhatsApp', args: [logout] });
@@ -114,7 +115,7 @@ test('parseYesNoInput handles Spanish/English affirmations, negatives, and empty
   assert.equal(parseYesNoInput('talvez', true), null);
 });
 
-test('ConsoleSessionController walks through interactive setup step-by-step', async () => {
+test('ConsoleSessionController walks through interactive setup with phone pairing code (no QR)', async () => {
   const logs: string[] = [];
   const { adapter, calls } = createMockAdapter();
   const controller = new ConsoleSessionController(adapter, (msg) => logs.push(msg));
@@ -135,16 +136,24 @@ test('ConsoleSessionController walks through interactive setup step-by-step', as
   await controller.handleLine('518294012');
   assert.equal(controller.getStep(), 'awaiting_pv_only');
 
-  // Confirm PV only and confirm QR generation
+  // Confirm PV only -> moves directly to step 4 (awaiting_wa_phone for 8-digit code)
   await controller.handleLine('s');
-  assert.equal(controller.getStep(), 'awaiting_qr_confirm');
+  assert.equal(controller.getStep(), 'awaiting_wa_phone');
 
-  await controller.handleLine('');
+  // Provide phone number
+  await controller.handleLine('+54 911 5555-1234');
   assert.equal(controller.getStep(), 'idle');
 
   assert.equal(calls.some((c) => c.fn === 'connectTelegram'), true);
   assert.equal(calls.some((c) => c.fn === 'updateRules'), true);
-  assert.equal(calls.some((c) => c.fn === 'connectWhatsApp'), true);
+  assert.equal(
+    calls.some(
+      (c) =>
+        c.fn === 'connectWhatsApp' &&
+        (c.args[0] as { pairingPhone?: string } | undefined)?.pairingPhone === '5491155551234',
+    ),
+    true,
+  );
 });
 
 test('ConsoleSessionController supports auto-detecting Chat ID via /start', async () => {
@@ -162,15 +171,38 @@ test('ConsoleSessionController supports auto-detecting Chat ID via /start', asyn
   assert.equal(calls.some((c) => c.fn === 'setTelegramChatId' && c.args[0] === '998877665'), true);
 });
 
-test('startInitialWizardIfNeeded skips wizard when Telegram is already configured via env', () => {
-  const { adapter } = createMockAdapter({ telegramConnected: true });
+test('startInitialWizardIfNeeded prompts for WhatsApp pairing code when Telegram is configured via env', async () => {
+  const { adapter, calls } = createMockAdapter({ telegramConnected: true, whatsappConnected: false });
+  const controller = new ConsoleSessionController(adapter, () => {});
+  assert.equal(controller.startInitialWizardIfNeeded(), true);
+  assert.equal(controller.getStep(), 'awaiting_wa_phone');
+
+  await controller.handleLine('5491155551234');
+  assert.equal(controller.getStep(), 'idle');
+  assert.equal(
+    calls.some(
+      (c) =>
+        c.fn === 'connectWhatsApp' &&
+        (c.args[0] as { pairingPhone?: string } | undefined)?.pairingPhone === '5491155551234',
+    ),
+    true,
+  );
+});
+
+test('startInitialWizardIfNeeded skips wizard when both Telegram and WhatsApp are connected', () => {
+  const { adapter } = createMockAdapter({ telegramConnected: true, whatsappConnected: true });
   const controller = new ConsoleSessionController(adapter, () => {});
   assert.equal(controller.startInitialWizardIfNeeded(), false);
   assert.equal(controller.getStep(), 'idle');
 });
 
-test('parseConsoleCommand parses WhatsApp, Telegram, rules, setup, and reply commands', () => {
+test('parseConsoleCommand parses codigo, qr, Telegram, rules, setup, and reply commands', () => {
   assert.deepEqual(parseConsoleCommand('setup'), { type: 'setup' });
+  assert.deepEqual(parseConsoleCommand('codigo'), { type: 'wa_pair_prompt' });
+  assert.deepEqual(parseConsoleCommand('codigo +54 911 5555-1234'), {
+    type: 'wa_pair_code',
+    phone: '+549115555-1234',
+  });
   assert.deepEqual(parseConsoleCommand('qr'), { type: 'wa_connect' });
   assert.deepEqual(parseConsoleCommand('wa logout'), { type: 'wa_disconnect', logout: true });
   assert.deepEqual(parseConsoleCommand('status'), { type: 'status' });

@@ -87,12 +87,20 @@ export class BridgeCoordinator {
       console.log('[Telegram] Sin configurar aún. Define TELEGRAM_BOT_TOKEN y TELEGRAM_CHAT_ID o escribe: tg <token> <chatId>');
     }
 
-    const autoConnectWa = process.env.WA_AUTO_CONNECT === 'true' || (Boolean(envToken && envChatId) && process.env.WA_AUTO_CONNECT !== 'false');
-    if (this.whatsapp.hasSavedSession() || autoConnectWa) {
-      console.log('[WhatsApp] Iniciando conexión automática...');
+    const pairingPhone = process.env.WA_PAIRING_PHONE?.trim() || undefined;
+    const forceQrOnBoot = process.env.WA_AUTH_MODE === 'qr' && process.env.WA_AUTO_CONNECT === 'true';
+
+    if (this.whatsapp.hasSavedSession()) {
+      console.log('[WhatsApp] Sesión guardada detectada. Reconectando automáticamente...');
+      await this.whatsapp.connect();
+    } else if (pairingPhone) {
+      console.log(`[WhatsApp] Solicitando código de vinculación (sin QR) para +${pairingPhone}...`);
+      await this.whatsapp.connect({ pairingPhone });
+    } else if (forceQrOnBoot) {
+      console.log('[WhatsApp] Iniciando conexión automática por QR...');
       await this.whatsapp.connect();
     } else {
-      console.log('[WhatsApp] Sesión no vinculada. Escribe "qr" en consola para generar el código QR.');
+      console.log('[WhatsApp] Sin vincular aún. Se solicitará tu número para generar código de 8 dígitos (sin QR).');
     }
   }
 

@@ -2,6 +2,7 @@ export type WhatsAppConnectionStatus =
   | 'disconnected'
   | 'connecting'
   | 'qr_ready'
+  | 'pairing_code_ready'
   | 'connected'
   | 'error';
 
@@ -75,6 +76,7 @@ export interface AuditLogEntry {
 export interface WhatsAppPublicState {
   status: WhatsAppConnectionStatus;
   qrDataUrl: string | null;
+  pairingCode: string | null;
   connectedPhone: string | null;
   connectedName: string | null;
   lastError: string | null;

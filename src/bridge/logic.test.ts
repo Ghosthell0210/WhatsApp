@@ -10,6 +10,8 @@ import {
   parseTelegramReplyCommand,
   validateTelegramConfigInput,
   maskToken,
+  sanitizePairingPhoneNumber,
+  formatPairingCode,
 } from './logic';
 import type { RoutingRules } from './types';
 
@@ -122,3 +124,10 @@ test('maskToken hides middle secret characters', () => {
   assert.equal(maskToken('7123456789:AAH_secret_value_12345'), '7123456••••2345');
   assert.equal(maskToken(''), '');
 });
+
+test('sanitizePairingPhoneNumber and formatPairingCode normalize phone digits and 8-char codes', () => {
+  assert.equal(sanitizePairingPhoneNumber('+54 9 11 5555-1234'), '5491155551234');
+  assert.equal(sanitizePairingPhoneNumber('12345'), null);
+  assert.equal(formatPairingCode('ab12cd34'), 'AB12-CD34');
+});
+

@@ -35,6 +35,7 @@ export default function App() {
   const fallbackWa = state?.whatsapp ?? {
     status: 'disconnected' as const,
     qrDataUrl: null,
+    pairingCode: null,
     connectedPhone: null,
     connectedName: null,
     lastError: null,

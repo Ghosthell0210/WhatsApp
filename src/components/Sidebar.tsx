@@ -15,6 +15,8 @@ function waStatusText(status: WhatsAppPublicState['status']): { label: string; t
   switch (status) {
     case 'connected':
       return { label: 'Conectado', tone: 'text-emerald-700' };
+    case 'pairing_code_ready':
+      return { label: 'Código listo', tone: 'text-amber-700' };
     case 'qr_ready':
       return { label: 'Esperando QR', tone: 'text-amber-700' };
     case 'connecting':

@@ -245,6 +245,7 @@ export class BridgeStore {
   private waState: WhatsAppPublicState = {
     status: 'disconnected',
     qrDataUrl: null,
+    pairingCode: null,
     connectedPhone: null,
     connectedName: null,
     lastError: null,

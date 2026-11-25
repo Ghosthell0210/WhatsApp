@@ -2,6 +2,7 @@ import QRCode from 'qrcode';
 import {
   maskToken,
   normalizePhoneToJid,
+  sanitizePairingPhoneNumber,
   validateBotTokenFormat,
   validateChatIdFormat,
   validateTelegramConfigInput,
@@ -14,7 +15,7 @@ export type ConsoleWizardStep =
   | 'awaiting_chat_id'
   | 'awaiting_detected_chat_id'
   | 'awaiting_pv_only'
-  | 'awaiting_qr_confirm';
+  | 'awaiting_wa_phone';
 
 export type ParsedConsoleCommand =
   | { type: 'empty' }
@@ -22,6 +23,8 @@ export type ParsedConsoleCommand =
   | { type: 'setup' }
   | { type: 'status' }
   | { type: 'wa_connect' }
+  | { type: 'wa_pair_prompt' }
+  | { type: 'wa_pair_code'; phone: string }
   | { type: 'wa_disconnect'; logout: boolean }
   | { type: 'tg_connect'; token: string; chatId: string }
   | { type: 'tg_disconnect' }
@@ -38,7 +41,7 @@ export interface ConsoleBridgeAdapter {
   testTelegram: () => Promise<{ ok: boolean; error?: string }>;
   setTelegramChatId: (chatId: string) => void;
   onTelegramChatIdDetected: (listener: (chatId: string) => void) => () => void;
-  connectWhatsApp: () => Promise<unknown>;
+  connectWhatsApp: (options?: { pairingPhone?: string }) => Promise<unknown>;
   disconnectWhatsApp: (logout: boolean) => Promise<unknown>;
   updateRules: (partial: Partial<RoutingRules>) => RoutingRules;
   sendOutboundReply: (params: {
@@ -81,9 +84,23 @@ export function parseConsoleCommand(line: string): ParsedConsoleCommand {
     return { type: 'wa_connect' };
   }
 
+  if (cmd === 'codigo' || cmd === 'código' || cmd === 'code' || cmd === 'vincular') {
+    const phone = parts.slice(1).join('');
+    if (phone) {
+      return { type: 'wa_pair_code', phone };
+    }
+    return { type: 'wa_pair_prompt' };
+  }
+
   if (cmd === 'wa') {
-    if (arg1 === 'connect' || arg1 === 'conectar' || arg1 === 'qr') {
+    if (arg1 === 'connect' || arg1 === 'conectar') {
+      return { type: 'wa_pair_prompt' };
+    }
+    if (arg1 === 'qr') {
       return { type: 'wa_connect' };
+    }
+    if ((arg1 === 'codigo' || arg1 === 'code') && parts[2]) {
+      return { type: 'wa_pair_code', phone: parts.slice(2).join('') };
     }
     if (arg1 === 'logout' || arg1 === 'cerrar') {
       return { type: 'wa_disconnect', logout: true };
@@ -138,9 +155,10 @@ export async function renderQrToTerminal(qrRaw: string): Promise<string> {
 export function formatConsoleHelp(): string {
   return [
     'Comandos disponibles en consola:',
-    '  setup                 Inicia el asistente paso a paso para pedir credenciales',
-    '  status                Muestra el estado de WhatsApp, Telegram y reglas',
+    '  setup                 Asistente paso a paso para pedir credenciales',
+    '  codigo <numero>       Genera código de 8 dígitos para vincular WhatsApp SIN QR',
     '  qr                    Inicia WhatsApp y muestra el código QR en consola',
+    '  status                Muestra el estado de WhatsApp, Telegram y reglas',
     '  wa logout             Cierra la sesión actual de WhatsApp para cambiar número',
     '  tg <token> <chatId>   Conecta el Bot de Telegram en un solo comando',
     '  tg test               Envía un mensaje de prueba al chat de Telegram',
@@ -170,11 +188,25 @@ export class ConsoleSessionController {
 
   startInitialWizardIfNeeded(): boolean {
     const state = this.adapter.getPublicState();
-    if (state.telegram.status === 'connected' && state.telegram.hasToken && state.telegram.chatId) {
-      return false;
+    const hasTelegram =
+      state.telegram.status === 'connected' && state.telegram.hasToken && Boolean(state.telegram.chatId);
+
+    if (!hasTelegram) {
+      this.startWizard();
+      return true;
     }
-    this.startWizard();
-    return true;
+
+    if (state.whatsapp.status === 'disconnected') {
+      this.step = 'awaiting_wa_phone';
+      this.log('\n==================================================');
+      this.log(' Vincular WhatsApp por código (sin QR)');
+      this.log('==================================================');
+      this.log('Ingresa tu número de WhatsApp con código de país (sin +, ej. 5491155551234):');
+      this.log('  (También puedes escribir "qr" para usar QR o "cancelar" para omitir)');
+      return true;
+    }
+
+    return false;
   }
 
   startWizard(): void {
@@ -285,26 +317,38 @@ export class ConsoleSessionController {
         return;
       }
 
-      this.step = 'awaiting_qr_confirm';
+      this.step = 'awaiting_wa_phone';
       this.log('');
-      this.log('[Paso 4/4] ¿Deseas generar el código QR de WhatsApp ahora para vincular tu teléfono? (s/n, Enter = sí):');
+      this.log(
+        '[Paso 4/4] Ingresa tu número de WhatsApp con código de país (sin +, ej. 5491155551234) para generar tu código de 8 dígitos (sin QR):',
+      );
+      this.log('  (También puedes escribir "qr" para código QR o "n" para omitir)');
       return;
     }
 
-    if (this.step === 'awaiting_qr_confirm') {
-      const answer = parseYesNoInput(trimmed, true);
-      if (answer === null) {
-        this.log('[Paso 4/4] Responde "s" (sí) o "n" (no). ¿Generar código QR ahora? (Enter = sí):');
+    if (this.step === 'awaiting_wa_phone') {
+      const lower = trimmed.toLowerCase();
+      if (lower === 'qr') {
+        this.finishWizard();
+        this.log('[WhatsApp] Generando código QR en consola...');
+        await this.adapter.connectWhatsApp();
+        return;
+      }
+      if (lower === 'n' || lower === 'no') {
+        this.finishWizard();
+        this.log('[WhatsApp] Omitido por ahora. Escribe "codigo <numero>" o "qr" cuando quieras vincular.');
+        return;
+      }
+
+      const cleanPhone = sanitizePairingPhoneNumber(trimmed);
+      if (!cleanPhone) {
+        this.log('[Error] Número inválido. Escribe código de país + número (ej. 5491155551234), o "qr"/"n":');
         return;
       }
 
       this.finishWizard();
-      if (answer) {
-        this.log('[WhatsApp] Generando código QR en consola...');
-        await this.adapter.connectWhatsApp();
-      } else {
-        this.log('[WhatsApp] Omitido por ahora. Escribe "qr" cuando quieras vincular WhatsApp.');
-      }
+      this.log(`[WhatsApp] Solicitando código de vinculación (sin QR) para +${cleanPhone}...`);
+      await this.adapter.connectWhatsApp({ pairingPhone: cleanPhone });
       return;
     }
 
@@ -352,7 +396,7 @@ export class ConsoleSessionController {
         const s = this.adapter.getPublicState();
         this.log('[Estado]');
         this.log(
-          `  WhatsApp : ${s.whatsapp.status}${s.whatsapp.connectedPhone ? ` (${s.whatsapp.connectedPhone})` : ''}`,
+          `  WhatsApp : ${s.whatsapp.status}${s.whatsapp.connectedPhone ? ` (${s.whatsapp.connectedPhone})` : ''}${s.whatsapp.pairingCode ? ` · Código: ${s.whatsapp.pairingCode}` : ''}`,
         );
         this.log(
           `  Telegram : ${s.telegram.status}${s.telegram.botUsername ? ` (@${s.telegram.botUsername})` : ''} · Chat ID: ${s.telegram.chatId || 'sin definir'} · Token: ${s.telegram.tokenMasked || 'sin definir'}`,
@@ -366,6 +410,22 @@ export class ConsoleSessionController {
         this.log('[WhatsApp] Iniciando sesión y generando código QR...');
         await this.adapter.connectWhatsApp();
         return;
+      case 'wa_pair_prompt':
+        this.step = 'awaiting_wa_phone';
+        this.log(
+          '[WhatsApp] Ingresa tu número con código de país (sin +, ej. 5491155551234) para generar tu código de 8 dígitos:',
+        );
+        return;
+      case 'wa_pair_code': {
+        const cleanPhone = sanitizePairingPhoneNumber(parsed.phone);
+        if (!cleanPhone) {
+          this.log('[WhatsApp] Número inválido. Ejemplo: codigo 5491155551234');
+          return;
+        }
+        this.log(`[WhatsApp] Solicitando código de vinculación (sin QR) para +${cleanPhone}...`);
+        await this.adapter.connectWhatsApp({ pairingPhone: cleanPhone });
+        return;
+      }
       case 'wa_disconnect':
         await this.adapter.disconnectWhatsApp(parsed.logout);
         this.log(

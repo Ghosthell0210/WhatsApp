@@ -113,10 +113,19 @@ export function useBridgeSocket() {
     };
   }, [fetchInitialState]);
 
-  const connectWhatsApp = useCallback(async () => {
-    const res = await fetch('/api/whatsapp/connect', { method: 'POST' });
-    return res.json();
-  }, []);
+  const connectWhatsApp = useCallback(
+    async (
+      pairingPhone?: string,
+    ): Promise<{ ok: boolean; message?: string }> => {
+      const res = await fetch('/api/whatsapp/connect', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(pairingPhone ? { pairingPhone } : {}),
+      });
+      return res.json();
+    },
+    [],
+  );
 
   const disconnectWhatsApp = useCallback(async (logout = false) => {
     const res = await fetch('/api/whatsapp/disconnect', {

@@ -264,3 +264,20 @@ export function maskToken(token: string): string {
   if (trimmed.length <= 12) return '••••••••';
   return `${trimmed.slice(0, 7)}••••${trimmed.slice(-4)}`;
 }
+
+export function sanitizePairingPhoneNumber(input: string): string | null {
+  const digits = input.replace(/[^0-9]/g, '');
+  if (digits.length < 8 || digits.length > 15) {
+    return null;
+  }
+  return digits;
+}
+
+export function formatPairingCode(rawCode: string): string {
+  const clean = rawCode.replace(/[^A-Za-z0-9]/g, '').toUpperCase();
+  if (clean.length === 8) {
+    return `${clean.slice(0, 4)}-${clean.slice(4)}`;
+  }
+  return clean;
+}
+

@@ -1,13 +1,13 @@
 import { useEffect, useState } from 'react';
-import { Eye, EyeOff, LogOut, QrCode, RefreshCw, Send, Smartphone } from 'lucide-react';
-import { validateTelegramConfigInput } from '../bridge/logic';
+import { Eye, EyeOff, KeyRound, LogOut, QrCode, RefreshCw, Send, Smartphone } from 'lucide-react';
+import { sanitizePairingPhoneNumber, validateTelegramConfigInput } from '../bridge/logic';
 import type { TelegramPublicState, WhatsAppPublicState } from '../bridge/types';
 import type { TelegramFormErrors } from '../hooks/useBridgeSocket';
 
 interface ConnectionsViewProps {
   whatsapp: WhatsAppPublicState;
   telegram: TelegramPublicState;
-  onConnectWhatsApp: () => Promise<unknown>;
+  onConnectWhatsApp: (pairingPhone?: string) => Promise<{ ok: boolean; message?: string }>;
   onDisconnectWhatsApp: (logout: boolean) => Promise<unknown>;
   onConnectTelegram: (
     token: string,
@@ -26,6 +26,9 @@ export function ConnectionsView({
   onDisconnectTelegram,
   onTestTelegram,
 }: ConnectionsViewProps) {
+  const [waMode, setWaMode] = useState<'code' | 'qr'>('code');
+  const [pairingPhone, setPairingPhone] = useState('');
+  const [waPhoneError, setWaPhoneError] = useState<string | null>(null);
   const [token, setToken] = useState('');
   const [chatId, setChatId] = useState(telegram.chatId || '');
   const [showToken, setShowToken] = useState(false);
@@ -42,9 +45,26 @@ export function ConnectionsView({
   }, [telegram.chatId, chatId]);
 
   const handleWaConnect = async () => {
+    setWaPhoneError(null);
+    let cleanPhone: string | undefined;
+
+    if (waMode === 'code') {
+      const sanitized = sanitizePairingPhoneNumber(pairingPhone);
+      if (!sanitized) {
+        setWaPhoneError(
+          'Ingresa tu número completo con código de país (solo 8 a 15 dígitos, sin +).',
+        );
+        return;
+      }
+      cleanPhone = sanitized;
+    }
+
     setWaBusy(true);
     try {
-      await onConnectWhatsApp();
+      const res = await onConnectWhatsApp(cleanPhone);
+      if (!res.ok && res.message) {
+        setWaPhoneError(res.message);
+      }
     } finally {
       setWaBusy(false);
     }
@@ -52,6 +72,7 @@ export function ConnectionsView({
 
   const handleWaDisconnect = async (logout: boolean) => {
     setWaBusy(true);
+    setWaPhoneError(null);
     try {
       await onDisconnectWhatsApp(logout);
     } finally {
@@ -117,6 +138,8 @@ export function ConnectionsView({
     }
   };
 
+  const isWaIdle = whatsapp.status === 'disconnected' || whatsapp.status === 'error';
+
   return (
     <div className="space-y-6">
       <div className="grid grid-cols-1 lg:grid-cols-2 gap-6 items-stretch">
@@ -129,7 +152,7 @@ export function ConnectionsView({
                   1. WhatsApp Web (Dispositivo vinculado)
                 </h2>
                 <p className="mt-1 text-sm text-slate-600">
-                  Escanea el código QR desde WhatsApp en tu teléfono para escuchar tus chats privados en tiempo real.
+                  Vincula tu cuenta por código de 8 dígitos (sin cámara ni QR) o con código QR tradicional.
                 </p>
               </div>
               <span
@@ -138,12 +161,15 @@ export function ConnectionsView({
                     ? 'text-emerald-700'
                     : whatsapp.status === 'error'
                       ? 'text-rose-700'
-                      : whatsapp.status === 'qr_ready' || whatsapp.status === 'connecting'
+                      : whatsapp.status === 'qr_ready' ||
+                          whatsapp.status === 'pairing_code_ready' ||
+                          whatsapp.status === 'connecting'
                         ? 'text-amber-700'
                         : 'text-slate-500'
                 }`}
               >
                 {whatsapp.status === 'connected' && 'Conectado'}
+                {whatsapp.status === 'pairing_code_ready' && 'Código listo'}
                 {whatsapp.status === 'qr_ready' && 'QR listo para escanear'}
                 {whatsapp.status === 'connecting' && 'Conectando...'}
                 {whatsapp.status === 'error' && 'Error de sesión'}
@@ -151,14 +177,73 @@ export function ConnectionsView({
               </span>
             </div>
 
+            {isWaIdle && (
+              <div
+                className="inline-flex p-1 bg-slate-100 rounded-lg border border-slate-200"
+                role="group"
+                aria-label="Método de vinculación de WhatsApp"
+              >
+                <button
+                  type="button"
+                  aria-pressed={waMode === 'code'}
+                  onClick={() => {
+                    setWaMode('code');
+                    setWaPhoneError(null);
+                  }}
+                  className={`inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium rounded-md transition-colors whitespace-nowrap ${
+                    waMode === 'code'
+                      ? 'bg-white text-slate-900 border border-slate-200'
+                      : 'text-slate-600 hover:text-slate-900'
+                  }`}
+                >
+                  <KeyRound className="w-3.5 h-3.5" aria-hidden="true" />
+                  <span>Con código (sin QR)</span>
+                </button>
+                <button
+                  type="button"
+                  aria-pressed={waMode === 'qr'}
+                  onClick={() => {
+                    setWaMode('qr');
+                    setWaPhoneError(null);
+                  }}
+                  className={`inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium rounded-md transition-colors whitespace-nowrap ${
+                    waMode === 'qr'
+                      ? 'bg-white text-slate-900 border border-slate-200'
+                      : 'text-slate-600 hover:text-slate-900'
+                  }`}
+                >
+                  <QrCode className="w-3.5 h-3.5" aria-hidden="true" />
+                  <span>Con código QR</span>
+                </button>
+              </div>
+            )}
+
             {whatsapp.lastError && (
               <div className="p-3 bg-rose-50 border border-rose-200 rounded-lg text-xs text-rose-800">
                 {whatsapp.lastError}
               </div>
             )}
 
-            <div className="p-5 bg-slate-50 border border-slate-200 rounded-xl flex flex-col items-center justify-center min-h-[250px] text-center">
-              {whatsapp.status === 'qr_ready' && whatsapp.qrDataUrl ? (
+            <div className="p-5 bg-slate-50 border border-slate-200 rounded-xl flex flex-col items-center justify-center min-h-[230px] text-center">
+              {whatsapp.status === 'pairing_code_ready' && whatsapp.pairingCode ? (
+                <div className="space-y-3 max-w-sm">
+                  <p className="text-xs font-medium text-slate-600">
+                    Tu código de vinculación de WhatsApp:
+                  </p>
+                  <div className="px-5 py-3 bg-white border border-slate-200 rounded-lg inline-block">
+                    <p
+                      data-testid="wa-pairing-code"
+                      className="font-mono tabular-nums text-2xl sm:text-3xl font-bold tracking-widest text-slate-900 select-all"
+                    >
+                      {whatsapp.pairingCode}
+                    </p>
+                  </div>
+                  <p className="text-xs text-slate-600 leading-relaxed">
+                    Abre WhatsApp en tu móvil → Dispositivos vinculados → Vincular dispositivo →{' '}
+                    <strong>Vincular con número de teléfono</strong> e ingresa este código.
+                  </p>
+                </div>
+              ) : whatsapp.status === 'qr_ready' && whatsapp.qrDataUrl ? (
                 <div className="space-y-3">
                   <div className="p-3 bg-white border border-slate-200 rounded-lg inline-block">
                     <img
@@ -193,15 +278,52 @@ export function ConnectionsView({
                 <div className="space-y-3">
                   <RefreshCw className="w-8 h-8 text-teal-700 mx-auto animate-spin" aria-hidden="true" />
                   <p className="text-sm font-medium text-slate-700">
-                    Iniciando sesión multi-dispositivo y generando QR...
+                    {waMode === 'code'
+                      ? 'Conectando y solicitando código de vinculación...'
+                      : 'Iniciando sesión multi-dispositivo y generando QR...'}
+                  </p>
+                </div>
+              ) : waMode === 'code' ? (
+                <div className="w-full max-w-sm space-y-3 text-left">
+                  <div className="flex items-center gap-2 text-slate-800">
+                    <KeyRound className="w-4 h-4 text-teal-700 shrink-0" aria-hidden="true" />
+                    <p className="text-sm font-medium">Vincular sin QR (recomendado en móvil)</p>
+                  </div>
+                  <div>
+                    <label
+                      htmlFor="wa-pairing-phone"
+                      className="block text-xs font-medium text-slate-700 mb-1.5"
+                    >
+                      Número de WhatsApp (código de país + número, sin +)
+                    </label>
+                    <input
+                      id="wa-pairing-phone"
+                      type="tel"
+                      inputMode="numeric"
+                      value={pairingPhone}
+                      onChange={(e) => {
+                        setPairingPhone(e.target.value);
+                        if (waPhoneError) setWaPhoneError(null);
+                      }}
+                      placeholder="Ej. 5491155551234"
+                      className="w-full px-3.5 py-2.5 text-sm font-mono tabular-nums bg-white border border-slate-200 rounded-lg text-slate-900 placeholder:text-slate-400 focus:outline-none focus:ring-2 focus:ring-teal-700/20 focus:border-teal-700"
+                    />
+                    {waPhoneError && (
+                      <p role="alert" className="mt-1.5 text-xs text-rose-700">
+                        {waPhoneError}
+                      </p>
+                    )}
+                  </div>
+                  <p className="text-xs text-slate-500">
+                    Recibirás un código de 8 dígitos (XXXX-XXXX) para copiar en WhatsApp sin usar cámara.
                   </p>
                 </div>
               ) : (
                 <div className="space-y-2.5 max-w-xs">
                   <QrCode className="w-10 h-10 text-slate-400 mx-auto" aria-hidden="true" />
-                  <p className="text-sm font-medium text-slate-800">Sesión no iniciada</p>
+                  <p className="text-sm font-medium text-slate-800">Vincular con código QR</p>
                   <p className="text-xs text-slate-500">
-                    Presiona "Generar código QR" para vincular tu cuenta de WhatsApp sin usar navegador externo.
+                    Presiona &quot;Generar código QR&quot; si tienes otro dispositivo para escanear la pantalla.
                   </p>
                 </div>
               )}
@@ -209,15 +331,25 @@ export function ConnectionsView({
           </div>
 
           <div className="flex flex-wrap items-center gap-2.5 pt-2 border-t border-slate-100">
-            {whatsapp.status === 'disconnected' || whatsapp.status === 'error' ? (
+            {isWaIdle ? (
               <button
                 type="button"
                 disabled={waBusy}
                 onClick={() => void handleWaConnect()}
                 className="inline-flex items-center gap-2 px-4 py-2.5 text-sm font-medium text-white bg-teal-700 hover:bg-teal-800 disabled:opacity-50 rounded-lg transition-colors whitespace-nowrap"
               >
-                <QrCode className="w-4 h-4" aria-hidden="true" />
-                <span>{waBusy ? 'Iniciando...' : 'Generar código QR'}</span>
+                {waMode === 'code' ? (
+                  <KeyRound className="w-4 h-4" aria-hidden="true" />
+                ) : (
+                  <QrCode className="w-4 h-4" aria-hidden="true" />
+                )}
+                <span>
+                  {waBusy
+                    ? 'Iniciando...'
+                    : waMode === 'code'
+                      ? 'Generar código de vinculación'
+                      : 'Generar código QR'}
+                </span>
               </button>
             ) : (
               <>
@@ -428,7 +560,7 @@ export function ConnectionsView({
             Configuración desde consola (Plugged Host / Pterodactyl)
           </h2>
           <p className="mt-1 text-sm text-slate-600">
-            Todo el puente funciona directamente desde la consola del servidor sin depender del navegador: el código QR se imprime en texto en la terminal y puedes controlar todo con comandos o variables de entorno.
+            Todo el puente funciona directamente desde la consola del servidor sin depender del navegador: puedes vincular WhatsApp con código de 8 dígitos (sin QR) o imprimir el QR en texto en la terminal.
           </p>
         </div>
 
@@ -439,6 +571,7 @@ export function ConnectionsView({
               <p>TELEGRAM_BOT_TOKEN=tu_token_de_botfather</p>
               <p>TELEGRAM_CHAT_ID=tu_chat_id_numerico</p>
               <p>WA_AUTO_CONNECT=true</p>
+              <p>WA_PAIRING_PHONE=5491155551234</p>
               <p>ONLY_PRIVATE_MESSAGES=true</p>
               <p>IGNORE_STATUS_BROADCASTS=true</p>
             </div>
@@ -447,10 +580,11 @@ export function ConnectionsView({
           <div className="space-y-2">
             <p className="font-semibold text-slate-900 text-sm">Comandos interactivos en la consola</p>
             <div className="p-3.5 bg-slate-50 border border-slate-200 rounded-lg font-mono text-slate-800 space-y-1">
+              <p>codigo &lt;numero&gt; — Genera código de 8 dígitos sin QR</p>
               <p>qr — Genera e imprime el código QR de WhatsApp en consola</p>
+              <p>setup — Inicia el asistente paso a paso en la consola</p>
               <p>tg &lt;token&gt; &lt;chatId&gt; — Conecta el bot de Telegram al vuelo</p>
               <p>status — Muestra estado de WhatsApp, Telegram y filtros</p>
-              <p>pv on | pv off — Activa o desactiva el filtro Solo PV</p>
               <p>wa logout — Cierra la sesión actual para cambiar de número</p>
             </div>
           </div>
