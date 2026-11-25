@@ -1,5 +1,7 @@
 import type { MediaKind, RoutingRules } from './types';
 
+export const MAX_MEDIA_BYTES = 25 * 1024 * 1024; // 25 MB RAM safety cap
+
 export interface JidCheckResult {
   allowed: boolean;
   reason?:
@@ -7,6 +9,7 @@ export interface JidCheckResult {
     | 'group_ignored'
     | 'broadcast_ignored'
     | 'newsletter_ignored'
+    | 'blocked_contact'
     | 'unsupported_jid';
 }
 
@@ -39,6 +42,9 @@ export function isPrivateWhatsAppJid(jid: string, rules: RoutingRules): JidCheck
   }
 
   if (trimmed.endsWith('@s.whatsapp.net') || trimmed.endsWith('@lid')) {
+    if (Array.isArray(rules.blockedJids) && rules.blockedJids.includes(trimmed)) {
+      return { allowed: false, reason: 'blocked_contact' };
+    }
     return { allowed: true };
   }
 
@@ -183,18 +189,138 @@ export function extractWhatsAppMessageText(message: Record<string, unknown> | nu
   return { text: '', mediaType: 'text' };
 }
 
+export interface MediaMetadataInfo {
+  kind: 'image' | 'video' | 'audio' | 'document' | 'sticker';
+  mimeType?: string;
+  fileName?: string;
+  ptt?: boolean;
+  caption?: string;
+  fileLength?: number;
+}
+
+function parseFileLength(raw: unknown): number | undefined {
+  if (typeof raw === 'number' && Number.isFinite(raw)) return raw;
+  if (typeof raw === 'bigint') return Number(raw);
+  if (typeof raw === 'string' && /^\d+$/.test(raw)) return Number(raw);
+  if (raw && typeof raw === 'object' && 'low' in raw) {
+    const num = Number((raw as { toString?: () => string }).toString?.() ?? NaN);
+    return Number.isFinite(num) ? num : undefined;
+  }
+  return undefined;
+}
+
+export function extractMediaMetadata(
+  message: Record<string, unknown> | null | undefined,
+): MediaMetadataInfo | null {
+  if (!message || typeof message !== 'object') return null;
+
+  const ephemeral = message.ephemeralMessage as { message?: Record<string, unknown> } | undefined;
+  if (ephemeral?.message) return extractMediaMetadata(ephemeral.message);
+  const viewOnce = message.viewOnceMessage as { message?: Record<string, unknown> } | undefined;
+  if (viewOnce?.message) return extractMediaMetadata(viewOnce.message);
+  const viewOnceV2 = message.viewOnceMessageV2 as { message?: Record<string, unknown> } | undefined;
+  if (viewOnceV2?.message) return extractMediaMetadata(viewOnceV2.message);
+
+  const image = message.imageMessage as
+    | { mimetype?: string; caption?: string; fileLength?: unknown }
+    | undefined;
+  if (image) {
+    return {
+      kind: 'image',
+      mimeType: image.mimetype,
+      caption: image.caption?.trim() || undefined,
+      fileLength: parseFileLength(image.fileLength),
+    };
+  }
+
+  const video = message.videoMessage as
+    | { mimetype?: string; caption?: string; fileLength?: unknown }
+    | undefined;
+  if (video) {
+    return {
+      kind: 'video',
+      mimeType: video.mimetype,
+      caption: video.caption?.trim() || undefined,
+      fileLength: parseFileLength(video.fileLength),
+    };
+  }
+
+  const audio = message.audioMessage as
+    | { mimetype?: string; ptt?: boolean; fileLength?: unknown }
+    | undefined;
+  if (audio) {
+    return {
+      kind: 'audio',
+      mimeType: audio.mimetype,
+      ptt: Boolean(audio.ptt),
+      fileLength: parseFileLength(audio.fileLength),
+    };
+  }
+
+  const doc = message.documentMessage as
+    | { mimetype?: string; fileName?: string; caption?: string; fileLength?: unknown }
+    | undefined;
+  if (doc) {
+    return {
+      kind: 'document',
+      mimeType: doc.mimetype,
+      fileName: doc.fileName?.trim() || undefined,
+      caption: doc.caption?.trim() || undefined,
+      fileLength: parseFileLength(doc.fileLength),
+    };
+  }
+
+  const sticker = message.stickerMessage as { mimetype?: string; fileLength?: unknown } | undefined;
+  if (sticker) {
+    return {
+      kind: 'sticker',
+      mimeType: sticker.mimetype,
+      fileLength: parseFileLength(sticker.fileLength),
+    };
+  }
+
+  return null;
+}
+
+export function formatByteSize(bytes: number): string {
+  if (!Number.isFinite(bytes) || bytes <= 0) return '0 KB';
+  if (bytes < 1024 * 1024) {
+    return `${Math.max(1, Math.round(bytes / 1024))} KB`;
+  }
+  return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
+}
+
+export function formatTelegramHeader(params: {
+  senderName: string;
+  phoneDisplay: string;
+  includePhoneHeader: boolean;
+}): string {
+  const safeName = params.senderName.trim() || params.phoneDisplay;
+  return params.includePhoneHeader && safeName !== params.phoneDisplay
+    ? `WhatsApp PV · ${safeName} (${params.phoneDisplay})`
+    : `WhatsApp PV · ${safeName}`;
+}
+
 export function formatTelegramForwardText(params: {
   senderName: string;
   phoneDisplay: string;
   text: string;
   includePhoneHeader: boolean;
 }): string {
-  const safeName = params.senderName.trim() || params.phoneDisplay;
-  const header = params.includePhoneHeader && safeName !== params.phoneDisplay
-    ? `WhatsApp PV · ${safeName} (${params.phoneDisplay})`
-    : `WhatsApp PV · ${safeName}`;
-
+  const header = formatTelegramHeader(params);
   return `${header}\n\n${params.text}\n\n— Responde a este mensaje para contestar por WhatsApp.`;
+}
+
+export function formatTelegramMediaCaption(params: {
+  senderName: string;
+  phoneDisplay: string;
+  caption?: string;
+  includePhoneHeader: boolean;
+}): string {
+  const header = formatTelegramHeader(params);
+  const body = params.caption?.trim() ? `\n\n${params.caption.trim()}` : '';
+  const combined = `${header}${body}\n\n— Responde a este mensaje para contestar por WhatsApp.`;
+  return combined.length <= 1024 ? combined : `${combined.slice(0, 1020)}…`;
 }
 
 export interface ParsedReplyCommand {

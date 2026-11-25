@@ -220,6 +220,8 @@ function buildSeedData(): PersistedBridgeData {
       includePhoneHeader: true,
       autoAcknowledge: false,
       autoAckMessage: 'Recibí tu mensaje, te respondo en breve.',
+      paused: false,
+      blockedJids: [],
     },
     conversations,
     auditLog,
@@ -241,6 +243,8 @@ function buildSeedData(): PersistedBridgeData {
 
 export class BridgeStore {
   private data: PersistedBridgeData;
+  private persistTimer: ReturnType<typeof setTimeout> | null = null;
+  private dirty = false;
 
   private waState: WhatsAppPublicState = {
     status: 'disconnected',
@@ -272,7 +276,20 @@ export class BridgeStore {
         const raw = fs.readFileSync(STATE_FILE, 'utf-8');
         const parsed = JSON.parse(raw) as PersistedBridgeData;
         if (parsed && typeof parsed === 'object' && Array.isArray(parsed.conversations)) {
-          return parsed;
+          return {
+            ...parsed,
+            rules: {
+              onlyPrivateMessages: parsed.rules?.onlyPrivateMessages ?? true,
+              ignoreStatusBroadcasts: parsed.rules?.ignoreStatusBroadcasts ?? true,
+              includePhoneHeader: parsed.rules?.includePhoneHeader ?? true,
+              autoAcknowledge: parsed.rules?.autoAcknowledge ?? false,
+              autoAckMessage: parsed.rules?.autoAckMessage ?? 'Recibí tu mensaje, te respondo en breve.',
+              paused: parsed.rules?.paused ?? false,
+              blockedJids: Array.isArray(parsed.rules?.blockedJids) ? parsed.rules.blockedJids : [],
+            },
+            telegramMap: parsed.telegramMap ?? {},
+            auditLog: Array.isArray(parsed.auditLog) ? parsed.auditLog : [],
+          };
         }
       }
     } catch {
@@ -287,21 +304,52 @@ export class BridgeStore {
     try {
       fs.mkdirSync(DATA_DIR, { recursive: true });
       const tmpPath = `${STATE_FILE}.tmp`;
-      fs.writeFileSync(tmpPath, JSON.stringify(target, null, 2), 'utf-8');
+      fs.writeFileSync(tmpPath, JSON.stringify(target), 'utf-8');
       fs.renameSync(tmpPath, STATE_FILE);
+      this.dirty = false;
     } catch (err) {
       console.error('[BridgeStore] Failed to persist state:', err);
     }
   }
 
+  private schedulePersist(): void {
+    this.dirty = true;
+    if (this.persistTimer) return;
+    this.persistTimer = setTimeout(() => {
+      this.persistTimer = null;
+      if (this.dirty) {
+        this.persistToDisk();
+      }
+    }, 1200);
+    if (typeof this.persistTimer.unref === 'function') {
+      this.persistTimer.unref();
+    }
+  }
+
+  flushToDisk(): void {
+    if (this.persistTimer) {
+      clearTimeout(this.persistTimer);
+      this.persistTimer = null;
+    }
+    if (this.dirty) {
+      this.persistToDisk();
+    }
+  }
+
   getRules(): RoutingRules {
-    return { ...this.data.rules };
+    return {
+      ...this.data.rules,
+      blockedJids: [...this.data.rules.blockedJids],
+    };
   }
 
   updateRules(partial: Partial<RoutingRules>): RoutingRules {
     this.data.rules = {
       ...this.data.rules,
       ...partial,
+      blockedJids: Array.isArray(partial.blockedJids)
+        ? [...new Set(partial.blockedJids)]
+        : [...this.data.rules.blockedJids],
     };
     this.persistToDisk();
     return this.getRules();
@@ -354,6 +402,7 @@ export class BridgeStore {
     text: string;
     mediaType?: MediaKind;
     telegramMessageId?: number;
+    extraTelegramMessageIds?: number[];
     deliveryStatus: BridgeMessage['deliveryStatus'];
     isSample?: boolean;
   }): { conversation: BridgeConversation; message: BridgeMessage; stats: BridgeStats } {
@@ -407,16 +456,22 @@ export class BridgeStore {
         conv.isSample = false;
       }
       conv.messages.push(message);
-      if (conv.messages.length > 200) {
-        conv.messages = conv.messages.slice(-200);
+      if (conv.messages.length > 150) {
+        conv.messages = conv.messages.slice(-150);
       }
     }
 
-    if (params.telegramMessageId) {
-      this.data.telegramMap[String(params.telegramMessageId)] = params.jid;
-      const keys = Object.keys(this.data.telegramMap);
-      if (keys.length > 1000) {
-        delete this.data.telegramMap[keys[0]];
+    const mappedIds = [
+      ...(params.telegramMessageId ? [params.telegramMessageId] : []),
+      ...(params.extraTelegramMessageIds ?? []),
+    ];
+    for (const tgId of mappedIds) {
+      this.data.telegramMap[String(tgId)] = params.jid;
+    }
+    const keys = Object.keys(this.data.telegramMap);
+    if (keys.length > 1500) {
+      for (const oldKey of keys.slice(0, keys.length - 1500)) {
+        delete this.data.telegramMap[oldKey];
       }
     }
 
@@ -426,7 +481,7 @@ export class BridgeStore {
       this.data.stats.totalRepliesToWa += 1;
     }
 
-    this.persistToDisk();
+    this.schedulePersist();
     return {
       conversation: { ...conv, messages: [...conv.messages] },
       message,
@@ -450,7 +505,7 @@ export class BridgeStore {
       this.data.auditLog = this.data.auditLog.slice(0, 250);
     }
 
-    this.persistToDisk();
+    this.schedulePersist();
     return { entry: fullEntry, stats: this.getStats() };
   }
 
@@ -458,7 +513,7 @@ export class BridgeStore {
     const conv = this.data.conversations.find((c) => c.jid === jid);
     if (!conv) return null;
     conv.unreadCount = 0;
-    this.persistToDisk();
+    this.schedulePersist();
     return { ...conv, messages: [...conv.messages] };
   }
 

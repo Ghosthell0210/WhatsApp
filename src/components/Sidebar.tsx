@@ -9,6 +9,7 @@ interface SidebarProps {
   whatsapp: WhatsAppPublicState;
   telegram: TelegramPublicState;
   unreadTotal: number;
+  paused?: boolean;
 }
 
 function waStatusText(status: WhatsAppPublicState['status']): { label: string; tone: string } {
@@ -47,6 +48,7 @@ export function Sidebar({
   whatsapp,
   telegram,
   unreadTotal,
+  paused = false,
 }: SidebarProps) {
   const waInfo = waStatusText(whatsapp.status);
   const tgInfo = tgStatusText(telegram.status);
@@ -127,6 +129,11 @@ export function Sidebar({
           {telegram.botUsername && (
             <p className="font-mono text-[11px] text-slate-500 pl-5 truncate">
               @{telegram.botUsername}
+            </p>
+          )}
+          {paused && (
+            <p className="text-[11px] font-medium text-amber-700 pl-5 pt-0.5">
+              Reenvío en pausa
             </p>
           )}
         </div>

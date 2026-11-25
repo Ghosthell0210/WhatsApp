@@ -64,6 +64,8 @@ export default function App() {
     includePhoneHeader: true,
     autoAcknowledge: false,
     autoAckMessage: 'Recibí tu mensaje, te respondo en breve.',
+    paused: false,
+    blockedJids: [],
   };
 
   return (
@@ -74,6 +76,7 @@ export default function App() {
         whatsapp={fallbackWa}
         telegram={fallbackTg}
         unreadTotal={unreadTotal}
+        paused={fallbackRules.paused}
       />
 
       <div className="flex-1 flex flex-col min-w-0">

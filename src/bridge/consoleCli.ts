@@ -1,5 +1,6 @@
 import QRCode from 'qrcode';
 import {
+  formatPhoneDisplay,
   maskToken,
   normalizePhoneToJid,
   sanitizePairingPhoneNumber,
@@ -22,6 +23,11 @@ export type ParsedConsoleCommand =
   | { type: 'help' }
   | { type: 'setup' }
   | { type: 'status' }
+  | { type: 'pause' }
+  | { type: 'resume' }
+  | { type: 'block'; target: string }
+  | { type: 'unblock'; target: string }
+  | { type: 'list_blocked' }
   | { type: 'wa_connect' }
   | { type: 'wa_pair_prompt' }
   | { type: 'wa_pair_code'; phone: string }
@@ -79,6 +85,21 @@ export function parseConsoleCommand(line: string): ParsedConsoleCommand {
   }
   if (cmd === 'status' || cmd === 'estado') {
     return { type: 'status' };
+  }
+  if (cmd === 'pausar' || cmd === 'pause') {
+    return { type: 'pause' };
+  }
+  if (cmd === 'reanudar' || cmd === 'resume') {
+    return { type: 'resume' };
+  }
+  if (cmd === 'bloqueados' || cmd === 'blocked') {
+    return { type: 'list_blocked' };
+  }
+  if ((cmd === 'bloquear' || cmd === 'block') && parts.length >= 2) {
+    return { type: 'block', target: parts.slice(1).join('') };
+  }
+  if ((cmd === 'desbloquear' || cmd === 'unblock') && parts.length >= 2) {
+    return { type: 'unblock', target: parts.slice(1).join('') };
   }
   if (cmd === 'qr') {
     return { type: 'wa_connect' };
@@ -159,6 +180,10 @@ export function formatConsoleHelp(): string {
     '  codigo <numero>       Genera código de 8 dígitos para vincular WhatsApp SIN QR',
     '  qr                    Inicia WhatsApp y muestra el código QR en consola',
     '  status                Muestra el estado de WhatsApp, Telegram y reglas',
+    '  pausar | reanudar     Pausa o reanuda el reenvío de WhatsApp a Telegram',
+    '  bloquear <numero>     Silencia un contacto para no reenviarlo a Telegram',
+    '  desbloquear <numero>  Quita un contacto de la lista de bloqueados',
+    '  bloqueados            Lista los contactos bloqueados actualmente',
     '  wa logout             Cierra la sesión actual de WhatsApp para cambiar número',
     '  tg <token> <chatId>   Conecta el Bot de Telegram en un solo comando',
     '  tg test               Envía un mensaje de prueba al chat de Telegram',
@@ -402,8 +427,60 @@ export class ConsoleSessionController {
           `  Telegram : ${s.telegram.status}${s.telegram.botUsername ? ` (@${s.telegram.botUsername})` : ''} · Chat ID: ${s.telegram.chatId || 'sin definir'} · Token: ${s.telegram.tokenMasked || 'sin definir'}`,
         );
         this.log(
-          `  Reglas   : Solo PV=${s.rules.onlyPrivateMessages ? 'ON' : 'OFF'} · Ignorar estados=${s.rules.ignoreStatusBroadcasts ? 'ON' : 'OFF'}`,
+          `  Reglas   : Reenvío=${s.rules.paused ? 'PAUSA' : 'ACTIVO'} · Solo PV=${s.rules.onlyPrivateMessages ? 'ON' : 'OFF'} · Ignorar estados=${s.rules.ignoreStatusBroadcasts ? 'ON' : 'OFF'} · Bloqueados=${s.rules.blockedJids.length}`,
         );
+        return;
+      }
+      case 'pause':
+        this.adapter.updateRules({ paused: true });
+        this.log('[Puente] Reenvío WA → TG PAUSADO. Escribe "reanudar" para reactivarlo.');
+        return;
+      case 'resume':
+        this.adapter.updateRules({ paused: false });
+        this.log('[Puente] Reenvío WA → TG REANUDADO.');
+        return;
+      case 'block': {
+        const jid = normalizePhoneToJid(parsed.target);
+        if (!jid) {
+          this.log('[Reglas] Número inválido. Ejemplo: bloquear +5491155551234');
+          return;
+        }
+        const current = this.adapter.getPublicState().rules.blockedJids;
+        const label = formatPhoneDisplay(jid);
+        if (current.includes(jid)) {
+          this.log(`[Reglas] ${label} ya estaba bloqueado.`);
+          return;
+        }
+        this.adapter.updateRules({ blockedJids: [...current, jid] });
+        this.log(`[Reglas] Contacto bloqueado: ${label}`);
+        return;
+      }
+      case 'unblock': {
+        const jid = normalizePhoneToJid(parsed.target);
+        if (!jid) {
+          this.log('[Reglas] Número inválido. Ejemplo: desbloquear +5491155551234');
+          return;
+        }
+        const current = this.adapter.getPublicState().rules.blockedJids;
+        const label = formatPhoneDisplay(jid);
+        if (!current.includes(jid)) {
+          this.log(`[Reglas] ${label} no está bloqueado.`);
+          return;
+        }
+        this.adapter.updateRules({ blockedJids: current.filter((item) => item !== jid) });
+        this.log(`[Reglas] Contacto desbloqueado: ${label}`);
+        return;
+      }
+      case 'list_blocked': {
+        const blocked = this.adapter.getPublicState().rules.blockedJids;
+        if (blocked.length === 0) {
+          this.log('[Reglas] No hay contactos bloqueados.');
+          return;
+        }
+        this.log(`[Reglas] Contactos bloqueados (${blocked.length}):`);
+        blocked.forEach((jid, idx) => {
+          this.log(`  ${idx + 1}. ${formatPhoneDisplay(jid)}`);
+        });
         return;
       }
       case 'wa_connect':

@@ -1,18 +1,29 @@
-import { Bot } from 'grammy';
+import { Bot, InputFile } from 'grammy';
 import {
   formatTelegramForwardText,
+  formatTelegramHeader,
+  formatTelegramMediaCaption,
   maskToken,
   normalizePhoneToJid,
   parseTelegramReplyCommand,
 } from './logic';
 import type { BridgeStore } from './store';
-import type { TelegramPublicState } from './types';
+import type { TelegramPublicState, WhatsAppMediaPayload } from './types';
 
 export interface TelegramReplyPayload {
   jid: string;
   text: string;
   telegramMessageId: number;
 }
+
+export type TelegramControlCommand =
+  | { type: 'status' }
+  | { type: 'pause' }
+  | { type: 'resume' }
+  | { type: 'block'; targetJidOrPhone: string }
+  | { type: 'unblock'; targetJidOrPhone: string }
+  | { type: 'list_blocked' }
+  | { type: 'help' };
 
 export class TelegramManager {
   private bot: Bot | null = null;
@@ -21,6 +32,7 @@ export class TelegramManager {
   private onStateChange: (state: TelegramPublicState) => void;
   private onReplyReceived: (payload: TelegramReplyPayload) => Promise<{ ok: boolean; detail: string }>;
   private onPairingRequest?: (phone: string) => Promise<string>;
+  private onControlCommand?: (cmd: TelegramControlCommand) => Promise<string>;
   private chatIdDetectedListeners = new Set<(chatId: string) => void>();
 
   constructor(params: {
@@ -28,11 +40,13 @@ export class TelegramManager {
     onStateChange: (state: TelegramPublicState) => void;
     onReplyReceived: (payload: TelegramReplyPayload) => Promise<{ ok: boolean; detail: string }>;
     onPairingRequest?: (phone: string) => Promise<string>;
+    onControlCommand?: (cmd: TelegramControlCommand) => Promise<string>;
   }) {
     this.store = params.store;
     this.onStateChange = params.onStateChange;
     this.onReplyReceived = params.onReplyReceived;
     this.onPairingRequest = params.onPairingRequest;
+    this.onControlCommand = params.onControlCommand;
   }
 
   onChatIdDetected(listener: (chatId: string) => void): () => void {
@@ -114,6 +128,46 @@ export class TelegramManager {
             reply_parameters: { message_id: ctx.message.message_id },
           });
           return;
+        }
+
+        // 0b. Check bridge administration commands (/estado, /pausar, /reanudar, /bloquear, /desbloquear, /bloqueados, /ayuda)
+        if (this.onControlCommand) {
+          const controlMatch = text.match(
+            /^\/(estado|status|pausar|pause|reanudar|resume|bloquear|desbloquear|bloqueados|ayuda|help)(?:@[A-Za-z0-9_]+)?(?:\s+(.+))?$/i,
+          );
+          if (controlMatch) {
+            const cmdName = controlMatch[1].toLowerCase();
+            const arg = (controlMatch[2] ?? '').trim();
+            let ctrlRes: string | null = null;
+
+            if (cmdName === 'estado' || cmdName === 'status') {
+              ctrlRes = await this.onControlCommand({ type: 'status' });
+            } else if (cmdName === 'pausar' || cmdName === 'pause') {
+              ctrlRes = await this.onControlCommand({ type: 'pause' });
+            } else if (cmdName === 'reanudar' || cmdName === 'resume') {
+              ctrlRes = await this.onControlCommand({ type: 'resume' });
+            } else if (cmdName === 'bloqueados') {
+              ctrlRes = await this.onControlCommand({ type: 'list_blocked' });
+            } else if (cmdName === 'ayuda' || cmdName === 'help') {
+              ctrlRes = await this.onControlCommand({ type: 'help' });
+            } else if (cmdName === 'bloquear') {
+              let target = arg;
+              if (!target && ctx.message.reply_to_message) {
+                target =
+                  this.store.lookupJidByTelegramMessageId(ctx.message.reply_to_message.message_id) ?? '';
+              }
+              ctrlRes = await this.onControlCommand({ type: 'block', targetJidOrPhone: target });
+            } else if (cmdName === 'desbloquear') {
+              ctrlRes = await this.onControlCommand({ type: 'unblock', targetJidOrPhone: arg });
+            }
+
+            if (ctrlRes !== null) {
+              await ctx.reply(ctrlRes, {
+                reply_parameters: { message_id: ctx.message.message_id },
+              });
+              return;
+            }
+          }
         }
 
         // 1. Check /reply or /responder command
@@ -214,10 +268,77 @@ export class TelegramManager {
     phoneDisplay: string;
     text: string;
     includePhoneHeader: boolean;
-  }): Promise<{ delivered: boolean; telegramMessageId?: number; error?: string }> {
+    media?: WhatsAppMediaPayload;
+  }): Promise<{
+    delivered: boolean;
+    telegramMessageId?: number;
+    extraTelegramMessageIds?: number[];
+    error?: string;
+  }> {
     const state = this.store.getTelegramState();
     if (!this.bot || state.status !== 'connected' || !state.chatId) {
       return { delivered: false, error: 'Telegram no conectado' };
+    }
+
+    if (params.media) {
+      try {
+        const media = params.media;
+        const caption = formatTelegramMediaCaption({
+          senderName: params.senderName,
+          phoneDisplay: params.phoneDisplay,
+          caption: media.caption,
+          includePhoneHeader: params.includePhoneHeader,
+        });
+        const ext = media.mimeType?.split('/')[1]?.split(';')[0] || 'bin';
+        const defaultName =
+          media.fileName ||
+          (media.kind === 'image'
+            ? `imagen.${ext}`
+            : media.kind === 'audio'
+              ? media.ptt
+                ? 'nota_de_voz.ogg'
+                : `audio.${ext}`
+              : media.kind === 'video'
+                ? `video.${ext}`
+                : media.kind === 'sticker'
+                  ? 'sticker.webp'
+                  : `archivo.${ext}`);
+        const inputFile = new InputFile(media.buffer, defaultName);
+
+        if (media.kind === 'image') {
+          const sent = await this.bot.api.sendPhoto(state.chatId, inputFile, { caption });
+          return { delivered: true, telegramMessageId: sent.message_id };
+        }
+        if (media.kind === 'audio') {
+          const sent = media.ptt
+            ? await this.bot.api.sendVoice(state.chatId, inputFile, { caption })
+            : await this.bot.api.sendAudio(state.chatId, inputFile, { caption });
+          return { delivered: true, telegramMessageId: sent.message_id };
+        }
+        if (media.kind === 'video') {
+          const sent = await this.bot.api.sendVideo(state.chatId, inputFile, { caption });
+          return { delivered: true, telegramMessageId: sent.message_id };
+        }
+        if (media.kind === 'sticker') {
+          const stickerMsg = await this.bot.api.sendSticker(state.chatId, inputFile);
+          const header = formatTelegramHeader(params);
+          const headerMsg = await this.bot.api.sendMessage(
+            state.chatId,
+            `${header}\n\n[Sticker recibido] — Responde a este mensaje para contestar por WhatsApp.`,
+            { reply_parameters: { message_id: stickerMsg.message_id } },
+          );
+          return {
+            delivered: true,
+            telegramMessageId: headerMsg.message_id,
+            extraTelegramMessageIds: [stickerMsg.message_id],
+          };
+        }
+
+        const sent = await this.bot.api.sendDocument(state.chatId, inputFile, { caption });
+        return { delivered: true, telegramMessageId: sent.message_id };
+      } catch {
+        // Fallback to text forwarding if Telegram rejects specific media encoding
+      }
     }
 
     try {

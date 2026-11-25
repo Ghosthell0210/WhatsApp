@@ -6,7 +6,10 @@ import {
   formatPhoneDisplay,
   normalizePhoneToJid,
   extractWhatsAppMessageText,
+  extractMediaMetadata,
+  formatByteSize,
   formatTelegramForwardText,
+  formatTelegramMediaCaption,
   parseTelegramReplyCommand,
   validateTelegramConfigInput,
   maskToken,
@@ -21,9 +24,11 @@ const defaultRules: RoutingRules = {
   includePhoneHeader: true,
   autoAcknowledge: false,
   autoAckMessage: '',
+  paused: false,
+  blockedJids: [],
 };
 
-test('isPrivateWhatsAppJid allows private DMs and blocks groups/broadcasts when enabled', () => {
+test('isPrivateWhatsAppJid allows private DMs and blocks groups/broadcasts/blocked contacts when enabled', () => {
   assert.deepEqual(isPrivateWhatsAppJid('5491155551234@s.whatsapp.net', defaultRules), {
     allowed: true,
   });
@@ -41,6 +46,15 @@ test('isPrivateWhatsAppJid allows private DMs and blocks groups/broadcasts when 
   assert.deepEqual(isPrivateWhatsAppJid('123456@newsletter', defaultRules), {
     allowed: false,
     reason: 'newsletter_ignored',
+  });
+
+  const withBlocked: RoutingRules = {
+    ...defaultRules,
+    blockedJids: ['5491155551234@s.whatsapp.net'],
+  };
+  assert.deepEqual(isPrivateWhatsAppJid('5491155551234@s.whatsapp.net', withBlocked), {
+    allowed: false,
+    reason: 'blocked_contact',
   });
 });
 
@@ -86,7 +100,31 @@ test('extractWhatsAppMessageText handles text, captions, voice notes, and wrappe
   });
 });
 
-test('formatTelegramForwardText formats clear reply-ready message', () => {
+test('extractMediaMetadata and formatByteSize inspect media messages accurately', () => {
+  const meta = extractMediaMetadata({
+    viewOnceMessageV2: {
+      message: {
+        documentMessage: {
+          mimetype: 'application/pdf',
+          fileName: 'factura.pdf',
+          caption: 'Adjunto factura',
+          fileLength: '1572864',
+        },
+      },
+    },
+  });
+  assert.deepEqual(meta, {
+    kind: 'document',
+    mimeType: 'application/pdf',
+    fileName: 'factura.pdf',
+    caption: 'Adjunto factura',
+    fileLength: 1572864,
+  });
+  assert.equal(formatByteSize(1572864), '1.5 MB');
+  assert.equal(formatByteSize(420_000), '410 KB');
+});
+
+test('formatTelegramForwardText and formatTelegramMediaCaption format bounded captions', () => {
   const formatted = formatTelegramForwardText({
     senderName: 'Lucía Méndez',
     phoneDisplay: '+5491155551234',
@@ -95,6 +133,14 @@ test('formatTelegramForwardText formats clear reply-ready message', () => {
   });
   assert.ok(formatted.includes('WhatsApp PV · Lucía Méndez (+5491155551234)'));
   assert.ok(formatted.includes('¿Seguimos con la reunión de hoy?'));
+
+  const longCaption = formatTelegramMediaCaption({
+    senderName: 'Lucía Méndez',
+    phoneDisplay: '+5491155551234',
+    caption: 'x'.repeat(1200),
+    includePhoneHeader: true,
+  });
+  assert.ok(longCaption.length <= 1024);
 });
 
 test('parseTelegramReplyCommand parses /reply and /responder commands', () => {

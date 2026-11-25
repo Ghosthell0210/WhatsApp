@@ -1,5 +1,6 @@
-import { useMemo, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import { Search } from 'lucide-react';
+import { formatPhoneDisplay, normalizePhoneToJid } from '../bridge/logic';
 import type { AuditLogEntry, RoutingRules } from '../bridge/types';
 
 interface RulesAndLogViewProps {
@@ -30,6 +31,10 @@ function actionLabel(action: AuditLogEntry['action']): { label: string; colorCla
       return { label: 'Grupo ignorado', colorClass: 'text-amber-700' };
     case 'ignored_broadcast':
       return { label: 'Estado ignorado', colorClass: 'text-amber-700' };
+    case 'ignored_blocked':
+      return { label: 'Contacto bloqueado', colorClass: 'text-amber-700' };
+    case 'ignored_paused':
+      return { label: 'En pausa', colorClass: 'text-amber-700' };
     default:
       return { label: 'Error', colorClass: 'text-rose-700' };
   }
@@ -39,7 +44,13 @@ export function RulesAndLogView({ rules, auditLog, onUpdateRules }: RulesAndLogV
   const [search, setSearch] = useState('');
   const [actionFilter, setActionFilter] = useState<LogActionFilter>('all');
   const [autoMsgDraft, setAutoMsgDraft] = useState(rules.autoAckMessage);
+  const [blockInput, setBlockInput] = useState('');
+  const [blockError, setBlockError] = useState<string | null>(null);
   const [savingRule, setSavingRule] = useState(false);
+
+  useEffect(() => {
+    setAutoMsgDraft(rules.autoAckMessage);
+  }, [rules.autoAckMessage]);
 
   const filteredLogs = useMemo(() => {
     const q = search.trim().toLowerCase();
@@ -49,7 +60,9 @@ export function RulesAndLogView({ rules, auditLog, onUpdateRules }: RulesAndLogV
       if (
         actionFilter === 'ignored' &&
         entry.action !== 'ignored_group' &&
-        entry.action !== 'ignored_broadcast'
+        entry.action !== 'ignored_broadcast' &&
+        entry.action !== 'ignored_blocked' &&
+        entry.action !== 'ignored_paused'
       ) {
         return false;
       }
@@ -81,6 +94,38 @@ export function RulesAndLogView({ rules, auditLog, onUpdateRules }: RulesAndLogV
     }
   };
 
+  const handleAddBlocked = async (e: React.FormEvent) => {
+    e.preventDefault();
+    setBlockError(null);
+    const jid = normalizePhoneToJid(blockInput);
+    if (!jid) {
+      setBlockError('Ingresa un número válido con código de país (ej. +5491155551234).');
+      return;
+    }
+    if (rules.blockedJids.includes(jid)) {
+      setBlockError(`El contacto ${formatPhoneDisplay(jid)} ya está bloqueado.`);
+      return;
+    }
+    setSavingRule(true);
+    try {
+      await onUpdateRules({ blockedJids: [...rules.blockedJids, jid] });
+      setBlockInput('');
+    } finally {
+      setSavingRule(false);
+    }
+  };
+
+  const handleUnblock = async (jid: string) => {
+    setSavingRule(true);
+    try {
+      await onUpdateRules({
+        blockedJids: rules.blockedJids.filter((item) => item !== jid),
+      });
+    } finally {
+      setSavingRule(false);
+    }
+  };
+
   return (
     <div className="space-y-6">
       {/* Routing rules panel */}
@@ -98,6 +143,24 @@ export function RulesAndLogView({ rules, auditLog, onUpdateRules }: RulesAndLogV
         </div>
 
         <div className="divide-y divide-slate-100">
+          <div className="py-3.5 flex items-center justify-between gap-4">
+            <div>
+              <label htmlFor="rule-paused" className="text-sm font-medium text-slate-900 block">
+                Pausar reenvío a Telegram
+              </label>
+              <p className="text-xs text-slate-500">
+                Detiene temporalmente el envío de nuevos mensajes privados sin desconectar WhatsApp.
+              </p>
+            </div>
+            <input
+              id="rule-paused"
+              type="checkbox"
+              checked={rules.paused}
+              onChange={(e) => void handleToggle('paused', e.target.checked)}
+              className="w-5 h-5 accent-teal-700 rounded cursor-pointer shrink-0"
+            />
+          </div>
+
           <div className="py-3.5 flex items-center justify-between gap-4">
             <div>
               <label htmlFor="rule-only-pv" className="text-sm font-medium text-slate-900 block">
@@ -194,6 +257,76 @@ export function RulesAndLogView({ rules, auditLog, onUpdateRules }: RulesAndLogV
             )}
           </div>
         </div>
+      </section>
+
+      {/* Blocked contacts panel */}
+      <section className="bg-white border border-slate-200 rounded-xl p-6 space-y-4">
+        <div>
+          <h2 className="font-display text-lg font-semibold text-slate-900">
+            Contactos bloqueados
+          </h2>
+          <p className="mt-1 text-sm text-slate-600">
+            Silencia números específicos para no recibir sus mensajes privados en Telegram. También puedes usar{' '}
+            <span className="font-mono text-xs text-slate-700">/bloquear</span> en Telegram.
+          </p>
+        </div>
+
+        <form onSubmit={(e) => void handleAddBlocked(e)} className="flex flex-col sm:flex-row gap-2.5">
+          <label htmlFor="block-phone-input" className="sr-only">
+            Número de teléfono o JID a bloquear
+          </label>
+          <input
+            id="block-phone-input"
+            type="text"
+            value={blockInput}
+            onChange={(e) => {
+              setBlockInput(e.target.value);
+              if (blockError) setBlockError(null);
+            }}
+            placeholder="Ej. +5491155551234"
+            className="flex-1 px-3.5 py-2 text-sm font-mono bg-slate-50 border border-slate-200 rounded-lg text-slate-900 placeholder:font-sans placeholder:text-slate-400 focus:outline-none focus:ring-2 focus:ring-teal-700/20 focus:border-teal-700"
+          />
+          <button
+            type="submit"
+            disabled={savingRule}
+            className="px-4 py-2 text-xs font-medium text-white bg-teal-700 hover:bg-teal-800 disabled:opacity-50 rounded-lg transition-colors whitespace-nowrap"
+          >
+            Bloquear número
+          </button>
+        </form>
+
+        {blockError && (
+          <p role="alert" className="text-xs text-rose-700">
+            {blockError}
+          </p>
+        )}
+
+        {rules.blockedJids.length === 0 ? (
+          <p className="text-xs text-slate-500 pt-1">
+            No hay contactos bloqueados. Todos los mensajes privados permitidos se reenviarán a Telegram.
+          </p>
+        ) : (
+          <ul className="divide-y divide-slate-100 border-t border-slate-100">
+            {rules.blockedJids.map((jid) => (
+              <li key={jid} className="py-2.5 flex items-center justify-between gap-3">
+                <div className="flex flex-wrap items-baseline gap-2 min-w-0">
+                  <span className="font-mono tabular-nums text-sm font-medium text-slate-900">
+                    {formatPhoneDisplay(jid)}
+                  </span>
+                  <span className="font-mono text-xs text-slate-500 truncate">{jid}</span>
+                </div>
+                <button
+                  type="button"
+                  onClick={() => void handleUnblock(jid)}
+                  disabled={savingRule}
+                  className="px-3 py-1.5 text-xs font-medium text-slate-700 bg-slate-100 hover:bg-slate-200 disabled:opacity-50 rounded-md transition-colors whitespace-nowrap shrink-0"
+                >
+                  Desbloquear
+                </button>
+              </li>
+            ))}
+          </ul>
+        )}
       </section>
 
       {/* High-density audit log table */}

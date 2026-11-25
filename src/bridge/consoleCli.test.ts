@@ -32,6 +32,8 @@ function createMockAdapter(overrides?: {
     includePhoneHeader: true,
     autoAcknowledge: false,
     autoAckMessage: '',
+    paused: false,
+    blockedJids: [],
   };
 
   const adapter: ConsoleBridgeAdapter = {
@@ -215,11 +217,40 @@ test('parseConsoleCommand parses codigo, qr, Telegram, rules, setup, and reply c
     },
   );
   assert.deepEqual(parseConsoleCommand('pv off'), { type: 'set_pv_only', value: false });
+  assert.deepEqual(parseConsoleCommand('pausar'), { type: 'pause' });
+  assert.deepEqual(parseConsoleCommand('reanudar'), { type: 'resume' });
+  assert.deepEqual(parseConsoleCommand('bloqueados'), { type: 'list_blocked' });
+  assert.deepEqual(parseConsoleCommand('bloquear +54 911 5555-1234'), {
+    type: 'block',
+    target: '+549115555-1234',
+  });
+  assert.deepEqual(parseConsoleCommand('desbloquear 5491155551234'), {
+    type: 'unblock',
+    target: '5491155551234',
+  });
   assert.deepEqual(parseConsoleCommand('responder +5491155551234 Hola qué tal'), {
     type: 'reply',
     target: '+5491155551234',
     message: 'Hola qué tal',
   });
+});
+
+test('ConsoleSessionController handles pausar, reanudar, bloquear, and desbloquear commands', async () => {
+  const logs: string[] = [];
+  const { adapter } = createMockAdapter({ telegramConnected: true, whatsappConnected: true });
+  const controller = new ConsoleSessionController(adapter, (msg) => logs.push(msg));
+
+  await controller.handleLine('pausar');
+  assert.equal(adapter.getPublicState().rules.paused, true);
+
+  await controller.handleLine('reanudar');
+  assert.equal(adapter.getPublicState().rules.paused, false);
+
+  await controller.handleLine('bloquear +5491155551234');
+  assert.deepEqual(adapter.getPublicState().rules.blockedJids, ['5491155551234@s.whatsapp.net']);
+
+  await controller.handleLine('desbloquear 5491155551234');
+  assert.deepEqual(adapter.getPublicState().rules.blockedJids, []);
 });
 
 test('renderQrToTerminal produces printable ASCII QR matrix', async () => {

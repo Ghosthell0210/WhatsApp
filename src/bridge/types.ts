@@ -59,6 +59,18 @@ export interface RoutingRules {
   includePhoneHeader: boolean;
   autoAcknowledge: boolean;
   autoAckMessage: string;
+  paused: boolean;
+  blockedJids: string[];
+}
+
+export interface WhatsAppMediaPayload {
+  kind: 'image' | 'video' | 'audio' | 'document' | 'sticker';
+  buffer: Buffer;
+  mimeType?: string;
+  fileName?: string;
+  ptt?: boolean;
+  caption?: string;
+  byteLength: number;
 }
 
 export interface AuditLogEntry {
@@ -67,7 +79,14 @@ export interface AuditLogEntry {
   source: 'whatsapp' | 'telegram' | 'web' | 'pipeline_test';
   jid: string;
   contactName: string;
-  action: 'forwarded_to_tg' | 'replied_to_wa' | 'ignored_group' | 'ignored_broadcast' | 'error';
+  action:
+    | 'forwarded_to_tg'
+    | 'replied_to_wa'
+    | 'ignored_group'
+    | 'ignored_broadcast'
+    | 'ignored_blocked'
+    | 'ignored_paused'
+    | 'error';
   detail: string;
   telegramMessageId?: number;
   isSample?: boolean;

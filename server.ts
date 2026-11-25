@@ -134,6 +134,15 @@ async function startServer() {
     if (typeof body.autoAckMessage === 'string') {
       nextPartial.autoAckMessage = body.autoAckMessage.slice(0, 400);
     }
+    if (typeof body.paused === 'boolean') {
+      nextPartial.paused = body.paused;
+    }
+    if (Array.isArray(body.blockedJids)) {
+      const normalized = body.blockedJids
+        .map((item: unknown) => (typeof item === 'string' ? normalizePhoneToJid(item) : null))
+        .filter((jid: string | null): jid is string => Boolean(jid));
+      nextPartial.blockedJids = [...new Set(normalized)];
+    }
 
     const updated = coordinator.updateRules(nextPartial);
     res.json({ ok: true, rules: updated });
@@ -270,6 +279,18 @@ async function startServer() {
       }
     });
   });
+
+  const gracefulShutdown = (signal: string) => {
+    console.log(`[Puente WA-TG] Señal ${signal} recibida, guardando historial en disco...`);
+    store.flushToDisk();
+    server.close(() => {
+      process.exit(0);
+    });
+    setTimeout(() => process.exit(0), 1500).unref();
+  };
+
+  process.on('SIGINT', () => gracefulShutdown('SIGINT'));
+  process.on('SIGTERM', () => gracefulShutdown('SIGTERM'));
 }
 
 startServer().catch((err) => {

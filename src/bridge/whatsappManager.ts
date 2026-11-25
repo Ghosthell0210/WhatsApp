@@ -5,19 +5,23 @@ import QRCode from 'qrcode';
 import makeWASocket, {
   Browsers,
   DisconnectReason,
+  downloadMediaMessage,
   fetchLatestBaileysVersion,
   jidNormalizedUser,
   useMultiFileAuthState,
   type WASocket,
 } from '@whiskeysockets/baileys';
 import {
+  extractMediaMetadata,
   extractWhatsAppMessageText,
+  formatByteSize,
   formatPairingCode,
   formatPhoneDisplay,
+  MAX_MEDIA_BYTES,
   sanitizePairingPhoneNumber,
 } from './logic';
 import type { BridgeStore } from './store';
-import type { MediaKind, WhatsAppPublicState } from './types';
+import type { MediaKind, WhatsAppMediaPayload, WhatsAppPublicState } from './types';
 
 const AUTH_DIR = path.resolve(process.cwd(), 'data/wa-auth');
 
@@ -26,6 +30,7 @@ export interface WhatsAppInboundPayload {
   senderName: string;
   text: string;
   mediaType: MediaKind;
+  media?: WhatsAppMediaPayload;
 }
 
 export interface WhatsAppConnectOptions {
@@ -296,15 +301,57 @@ export class WhatsAppManager {
           if (!rawJid) continue;
           const normalizedJid = rawJid.endsWith('@s.whatsapp.net') ? jidNormalizedUser(rawJid) : rawJid;
 
-          const extracted = extractWhatsAppMessageText(msg.message as Record<string, unknown> | null | undefined);
+          const messageObj = msg.message as Record<string, unknown> | null | undefined;
+          const extracted = extractWhatsAppMessageText(messageObj);
           if (!extracted.text) continue;
+
+          let mediaPayload: WhatsAppMediaPayload | undefined;
+          let finalText = extracted.text;
+          const mediaMeta = extractMediaMetadata(messageObj);
+
+          if (mediaMeta) {
+            if (mediaMeta.fileLength && mediaMeta.fileLength > MAX_MEDIA_BYTES) {
+              finalText = `${extracted.text} (${formatByteSize(mediaMeta.fileLength)} · omitido por límite de 25 MB)`;
+            } else {
+              try {
+                const downloaded = await downloadMediaMessage(
+                  msg,
+                  'buffer',
+                  {},
+                  {
+                    logger: pino({ level: 'silent' }),
+                    reuploadRequest: sock.updateMediaMessage,
+                  },
+                );
+                if (Buffer.isBuffer(downloaded) && downloaded.byteLength > 0) {
+                  if (downloaded.byteLength <= MAX_MEDIA_BYTES) {
+                    mediaPayload = {
+                      kind: mediaMeta.kind,
+                      buffer: downloaded,
+                      mimeType: mediaMeta.mimeType,
+                      fileName: mediaMeta.fileName,
+                      ptt: mediaMeta.ptt,
+                      caption: mediaMeta.caption,
+                      byteLength: downloaded.byteLength,
+                    };
+                    finalText = `${extracted.text} (${formatByteSize(downloaded.byteLength)})`;
+                  } else {
+                    finalText = `${extracted.text} (${formatByteSize(downloaded.byteLength)} · omitido por límite de 25 MB)`;
+                  }
+                }
+              } catch {
+                finalText = `${extracted.text} (no se pudo descargar el archivo)`;
+              }
+            }
+          }
 
           const senderName = msg.pushName?.trim() || formatPhoneDisplay(normalizedJid);
           await this.onIncomingMessage({
             jid: normalizedJid,
             senderName,
-            text: extracted.text,
+            text: finalText,
             mediaType: extracted.mediaType,
+            media: mediaPayload,
           });
         }
       });

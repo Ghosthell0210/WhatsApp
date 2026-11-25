@@ -1,6 +1,18 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
-import { ArrowLeft, Search, Send, Trash2 } from 'lucide-react';
-import type { BridgeConversation, BridgeStats, WhatsAppPublicState } from '../bridge/types';
+import {
+  ArrowLeft,
+  FileText,
+  Film,
+  Image as ImageIcon,
+  MapPin,
+  Mic,
+  Search,
+  Send,
+  Smile,
+  Trash2,
+  User,
+} from 'lucide-react';
+import type { BridgeConversation, BridgeMessage, BridgeStats, WhatsAppPublicState } from '../bridge/types';
 
 interface InboxViewProps {
   conversations: BridgeConversation[];
@@ -33,6 +45,30 @@ function formatDateTime(ts: number): string {
     hour: '2-digit',
     minute: '2-digit',
   });
+}
+
+function mediaIndicator(mediaType: BridgeMessage['mediaType']): {
+  label: string;
+  icon: typeof ImageIcon;
+} | null {
+  switch (mediaType) {
+    case 'image':
+      return { label: 'Imagen adjunta', icon: ImageIcon };
+    case 'audio':
+      return { label: 'Audio / Nota de voz', icon: Mic };
+    case 'video':
+      return { label: 'Video adjunto', icon: Film };
+    case 'document':
+      return { label: 'Documento adjunto', icon: FileText };
+    case 'sticker':
+      return { label: 'Sticker', icon: Smile };
+    case 'location':
+      return { label: 'Ubicación', icon: MapPin };
+    case 'contact':
+      return { label: 'Contacto compartido', icon: User };
+    default:
+      return null;
+  }
 }
 
 export function InboxView({
@@ -373,6 +409,8 @@ export function InboxView({
               <div className="flex-1 overflow-y-auto p-5 space-y-4">
                 {activeConversation.messages.map((msg) => {
                   const isInbound = msg.direction === 'inbound_wa';
+                  const media = mediaIndicator(msg.mediaType);
+                  const MediaIcon = media?.icon;
                   return (
                     <div
                       key={msg.id}
@@ -387,6 +425,16 @@ export function InboxView({
                               : 'bg-teal-700 border-teal-700 text-white'
                         }`}
                       >
+                        {media && MediaIcon && (
+                          <div
+                            className={`mb-1 flex items-center gap-1.5 text-[11px] font-medium ${
+                              msg.direction === 'outbound_web' ? 'text-teal-100' : 'text-teal-700'
+                            }`}
+                          >
+                            <MediaIcon className="w-3.5 h-3.5 shrink-0" aria-hidden="true" />
+                            <span>{media.label}</span>
+                          </div>
+                        )}
                         <p className="text-sm leading-relaxed whitespace-pre-wrap break-words">
                           {msg.text}
                         </p>
