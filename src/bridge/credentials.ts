@@ -78,18 +78,31 @@ export class CredentialsStore {
 
   private loadFromDisk(): StoredCredentials {
     const candidates = [this.primaryFile, ALT_CRED_FILE, DATA_CRED_FILE];
-    let loaded: StoredCredentials | null = null;
+    let loaded: StoredCredentials = { ...DEFAULT_CREDENTIALS };
 
     for (const candidate of candidates) {
       const parsed = readJsonSafe<Partial<StoredCredentials>>(candidate);
       if (parsed && typeof parsed === 'object') {
-        loaded = normalizeCredentials(parsed);
-        break;
+        const normalized = normalizeCredentials(parsed);
+        if (!loaded.telegramBotToken && normalized.telegramBotToken) {
+          loaded.telegramBotToken = normalized.telegramBotToken;
+        }
+        if (!loaded.telegramChatId && normalized.telegramChatId) {
+          loaded.telegramChatId = normalized.telegramChatId;
+        }
+        if (!loaded.whatsappPairingPhone && normalized.whatsappPairingPhone) {
+          loaded.whatsappPairingPhone = normalized.whatsappPairingPhone;
+        }
+        if (!loaded.keepAliveUrl && normalized.keepAliveUrl) {
+          loaded.keepAliveUrl = normalized.keepAliveUrl;
+        }
+        if (normalized.keepAliveIntervalSec !== 45 && loaded.keepAliveIntervalSec === 45) {
+          loaded.keepAliveIntervalSec = normalized.keepAliveIntervalSec;
+        }
+        if (!loaded.updatedAt && normalized.updatedAt) {
+          loaded.updatedAt = normalized.updatedAt;
+        }
       }
-    }
-
-    if (!loaded) {
-      loaded = { ...DEFAULT_CREDENTIALS };
     }
 
     // Migrate legacy Telegram session file if token/chatId missing
@@ -106,14 +119,19 @@ export class CredentialsStore {
       }
     }
 
-    // Ensure credenciales.json exists on disk once any credential is configured or migrated
-    if (
-      migrated ||
-      (!fs.existsSync(this.primaryFile) &&
-        (loaded.telegramBotToken || loaded.telegramChatId || loaded.whatsappPairingPhone))
-    ) {
-      loaded.updatedAt = loaded.updatedAt ?? Date.now();
+    // Always ensure credenciales.json exists on disk so user can see/edit it anytime
+    if (migrated || !fs.existsSync(this.primaryFile)) {
+      if (loaded.telegramBotToken || loaded.telegramChatId || loaded.whatsappPairingPhone) {
+        loaded.updatedAt = loaded.updatedAt ?? Date.now();
+      }
       writeAtomicSecure(this.primaryFile, loaded);
+    }
+
+    if (
+      (loaded.telegramBotToken || loaded.telegramChatId || loaded.whatsappPairingPhone) &&
+      !fs.existsSync(DATA_CRED_FILE)
+    ) {
+      writeAtomicSecure(DATA_CRED_FILE, loaded);
     }
 
     return loaded;
@@ -145,6 +163,9 @@ export class CredentialsStore {
     });
     this.cached = next;
     writeAtomicSecure(this.primaryFile, next);
+    if (this.primaryFile === PRIMARY_CRED_FILE) {
+      writeAtomicSecure(DATA_CRED_FILE, next);
+    }
 
     // Keep legacy session file in sync for backward compatibility
     if (next.telegramBotToken) {
@@ -175,6 +196,9 @@ export class CredentialsStore {
     this.cached = { ...DEFAULT_CREDENTIALS, updatedAt: Date.now() };
     writeAtomicSecure(this.primaryFile, this.cached);
     try {
+      if (this.primaryFile === PRIMARY_CRED_FILE && fs.existsSync(DATA_CRED_FILE)) {
+        fs.rmSync(DATA_CRED_FILE, { force: true });
+      }
       if (fs.existsSync(LEGACY_TG_SESSION_FILE)) {
         fs.rmSync(LEGACY_TG_SESSION_FILE, { force: true });
       }

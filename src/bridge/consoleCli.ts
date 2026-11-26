@@ -3,6 +3,7 @@ import {
   formatPhoneDisplay,
   maskToken,
   normalizePhoneToJid,
+  parseAuthorizedChatIds,
   sanitizePairingPhoneNumber,
   validateBotTokenFormat,
   validateChatIdFormat,
@@ -33,6 +34,8 @@ export type ParsedConsoleCommand =
   | { type: 'wa_pair_code'; phone: string }
   | { type: 'wa_disconnect'; logout: boolean }
   | { type: 'tg_connect'; token: string; chatId: string }
+  | { type: 'tg_set_chat_id'; chatId: string }
+  | { type: 'tg_add_chat_id'; chatId: string }
   | { type: 'tg_disconnect' }
   | { type: 'tg_test' }
   | { type: 'set_pv_only'; value: boolean }
@@ -139,6 +142,12 @@ export function parseConsoleCommand(line: string): ParsedConsoleCommand {
     if (arg1 === 'test' || arg1 === 'prueba') {
       return { type: 'tg_test' };
     }
+    if ((arg1 === 'chatid' || arg1 === 'chat' || arg1 === 'autorizar') && parts.length >= 3) {
+      return { type: 'tg_set_chat_id', chatId: parts.slice(2).join(',') };
+    }
+    if ((arg1 === 'addchat' || arg1 === 'agregar') && parts.length >= 3) {
+      return { type: 'tg_add_chat_id', chatId: parts.slice(2).join(',') };
+    }
     if (parts.length >= 3) {
       return {
         type: 'tg_connect',
@@ -187,6 +196,8 @@ export function formatConsoleHelp(): string {
     '  bloqueados            Lista los contactos bloqueados actualmente',
     '  wa logout             Cierra la sesión actual de WhatsApp para cambiar número',
     '  tg <token> <chatId>   Conecta el Bot de Telegram en un solo comando',
+    '  tg chatid <chatId>    Cambia y guarda el Chat ID autorizado en credenciales.json',
+    '  tg addchat <chatId>   Añade otro Chat ID autorizado sin quitar el actual',
     '  tg test               Envía un mensaje de prueba al chat de Telegram',
     '  tg disconnect         Desconecta el bot de Telegram',
     '  pv on | pv off        Activa o desactiva el filtro Solo mensajes privados',
@@ -224,9 +235,13 @@ export class ConsoleSessionController {
       return true;
     }
 
-    const hasWaSession =
-      state.whatsapp.status !== 'disconnected' || Boolean(this.adapter.hasSavedWhatsAppSession?.());
-    if (!hasWaSession) {
+    const hasWaConfigured =
+      state.whatsapp.status !== 'disconnected' ||
+      Boolean(this.adapter.hasSavedWhatsAppSession?.()) ||
+      Boolean(state.credentials?.whatsappPairingPhone) ||
+      Boolean(process.env.WA_PAIRING_PHONE?.trim());
+
+    if (!hasWaConfigured) {
       this.step = 'awaiting_wa_phone';
       this.log('\n==================================================');
       this.log(' Vincular WhatsApp por código (sin QR)');
@@ -534,6 +549,35 @@ export class ConsoleSessionController {
         } else {
           this.log(`[Telegram] Error: ${next.lastError || 'No se pudo conectar'}`);
         }
+        return;
+      }
+      case 'tg_set_chat_id': {
+        const chatIdErr = validateChatIdFormat(parsed.chatId);
+        if (chatIdErr) {
+          this.log(`[Telegram] ${chatIdErr}`);
+          return;
+        }
+        const normalized = parseAuthorizedChatIds(parsed.chatId).join(', ');
+        this.adapter.setTelegramChatId(normalized);
+        this.log(`[Telegram] Chat ID autorizado actualizado en credenciales.json: ${normalized}`);
+        if (process.env.TELEGRAM_CHAT_ID?.trim() && process.env.TELEGRAM_CHAT_ID.trim() !== normalized) {
+          this.log(
+            '[Telegram] Aviso: TELEGRAM_CHAT_ID está definido en las variables del servidor; actualízalo o déjalo vacío para que no sobrescriba credenciales.json al reiniciar.',
+          );
+        }
+        return;
+      }
+      case 'tg_add_chat_id': {
+        const chatIdErr = validateChatIdFormat(parsed.chatId);
+        if (chatIdErr) {
+          this.log(`[Telegram] ${chatIdErr}`);
+          return;
+        }
+        const existing = parseAuthorizedChatIds(this.adapter.getPublicState().telegram.chatId);
+        const added = parseAuthorizedChatIds(parsed.chatId);
+        const combined = [...new Set([...existing, ...added])].join(', ');
+        this.adapter.setTelegramChatId(combined);
+        this.log(`[Telegram] Chat(s) autorizado(s) guardados en credenciales.json: ${combined}`);
         return;
       }
       case 'tg_disconnect':

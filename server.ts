@@ -75,8 +75,10 @@ async function startServer() {
   });
 
   app.post('/api/telegram/connect', async (req, res) => {
-    const token = typeof req.body?.token === 'string' ? req.body.token.trim() : '';
+    const rawToken = typeof req.body?.token === 'string' ? req.body.token.trim() : '';
     const chatId = typeof req.body?.chatId === 'string' ? req.body.chatId.trim() : '';
+    const savedToken = coordinator.store.credentials.get().telegramBotToken;
+    const token = rawToken || savedToken;
 
     const validation = validateTelegramConfigInput(token, chatId);
     if (!validation.valid) {
@@ -85,6 +87,12 @@ async function startServer() {
         errors: validation.errors,
         message: 'Revisa el Token del Bot y el Chat ID de Telegram.',
       });
+      return;
+    }
+
+    if (!rawToken && coordinator.telegram.isActive()) {
+      const tgState = coordinator.telegram.setChatId(chatId);
+      res.json({ ok: true, telegram: tgState });
       return;
     }
 

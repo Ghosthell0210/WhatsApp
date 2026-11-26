@@ -15,6 +15,10 @@ import {
   formatTelegramMessageHtml,
   parseTelegramReplyCommand,
   parseVcfContacts,
+  parseAuthorizedChatIds,
+  getPrimaryChatId,
+  isTelegramChatAuthorized,
+  validateChatIdFormat,
   validateTelegramConfigInput,
   maskToken,
   sanitizePairingPhoneNumber,
@@ -264,6 +268,7 @@ test('CredentialsStore saves, reloads, masks, and clears credentials in a dedica
 
   try {
     const store1 = new CredentialsStore(credFile);
+    assert.equal(fs.existsSync(credFile), true);
     store1.save({
       telegramBotToken: '7123456789:AAH_secret_value_12345',
       telegramChatId: '518294012',
@@ -292,6 +297,21 @@ test('CredentialsStore saves, reloads, masks, and clears credentials in a dedica
     fs.rmSync(tmpDir, { recursive: true, force: true });
   }
 });
+
+test('parseAuthorizedChatIds, getPrimaryChatId, and isTelegramChatAuthorized support single and multiple Chat IDs', () => {
+  assert.deepEqual(parseAuthorizedChatIds('1981484200, -1001234567890, 1981484200'), [
+    '1981484200',
+    '-1001234567890',
+  ]);
+  assert.equal(getPrimaryChatId('1981484200, -1001234567890'), '1981484200');
+  assert.equal(isTelegramChatAuthorized('1981484200', '1981484200, -1001234567890'), true);
+  assert.equal(isTelegramChatAuthorized('-1001234567890', '1981484200, -1001234567890'), true);
+  assert.equal(isTelegramChatAuthorized('999888777', '1981484200, -1001234567890'), false);
+  assert.equal(isTelegramChatAuthorized('999888777', ''), true);
+  assert.equal(validateChatIdFormat('1981484200, -1001234567890'), undefined);
+  assert.ok(validateChatIdFormat('1981484200, invalido'));
+});
+
 
 
 

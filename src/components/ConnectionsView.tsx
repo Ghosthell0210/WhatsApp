@@ -1,6 +1,10 @@
 import { useEffect, useState } from 'react';
 import { Eye, EyeOff, FileKey2, KeyRound, LogOut, QrCode, RefreshCw, Send, Smartphone, Trash2 } from 'lucide-react';
-import { sanitizePairingPhoneNumber, validateTelegramConfigInput } from '../bridge/logic';
+import {
+  sanitizePairingPhoneNumber,
+  validateChatIdFormat,
+  validateTelegramConfigInput,
+} from '../bridge/logic';
 import type { CredentialsSummary, TelegramPublicState, WhatsAppPublicState } from '../bridge/types';
 import type { TelegramFormErrors } from '../hooks/useBridgeSocket';
 
@@ -96,7 +100,16 @@ export function ConnectionsView({
     setTgFeedback(null);
     setFieldErrors({});
 
-    const localValidation = validateTelegramConfigInput(token, chatId);
+    const localValidation =
+      telegram.hasToken && !token.trim()
+        ? (() => {
+            const chatErr = validateChatIdFormat(chatId);
+            return {
+              valid: !chatErr,
+              errors: (chatErr ? { chatId: chatErr } : {}) as TelegramFormErrors,
+            };
+          })()
+        : validateTelegramConfigInput(token, chatId);
     if (!localValidation.valid) {
       setFieldErrors(localValidation.errors);
       setTgFeedback({
@@ -650,6 +663,7 @@ export function ConnectionsView({
               <p>qr — Genera e imprime el código QR de WhatsApp en consola</p>
               <p>setup — Inicia el asistente paso a paso en la consola</p>
               <p>tg &lt;token&gt; &lt;chatId&gt; — Conecta el bot de Telegram al vuelo</p>
+              <p>tg chatid &lt;chatId&gt; — Autoriza o cambia el Chat ID guardado</p>
               <p>status — Muestra estado de WhatsApp, Telegram y filtros</p>
               <p>wa logout — Cierra la sesión actual para cambiar de número</p>
             </div>

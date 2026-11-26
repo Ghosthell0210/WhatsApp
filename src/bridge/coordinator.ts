@@ -416,10 +416,13 @@ export class BridgeCoordinator {
     const envChatId = process.env.TELEGRAM_CHAT_ID?.trim() ?? '';
     const savedCreds = this.store.credentials.get();
     const savedSession = this.telegram.loadSavedSession();
-    const bootToken = envToken || savedCreds.telegramBotToken || savedSession?.botToken || '';
-    const bootChatId = envChatId || savedCreds.telegramChatId || savedSession?.chatId || '';
+    const bootToken = savedCreds.telegramBotToken || envToken || savedSession?.botToken || '';
+    const bootChatId = savedCreds.telegramChatId || envChatId || savedSession?.chatId || '';
 
-    if (bootToken && (envToken || envChatId)) {
+    if (
+      (bootToken && bootToken !== savedCreds.telegramBotToken) ||
+      (bootChatId && bootChatId !== savedCreds.telegramChatId)
+    ) {
       this.store.credentials.save({
         telegramBotToken: bootToken,
         telegramChatId: bootChatId,
@@ -430,21 +433,25 @@ export class BridgeCoordinator {
       const tgState = await this.telegram.connect(bootToken, bootChatId);
       if (tgState.status === 'connected') {
         console.log(
-          `[Telegram] ${envToken ? 'Bot conectado desde variables de entorno' : 'Credenciales restauradas automáticamente'} (@${tgState.botUsername}) -> Chat ID ${tgState.chatId || 'pendiente de auto-autorización al enviar /start'}`,
+          `[Telegram] ${savedCreds.telegramBotToken ? 'Credenciales restauradas desde credenciales.json' : 'Bot conectado automáticamente'} (@${tgState.botUsername}) -> Chat ID ${tgState.chatId || 'pendiente de auto-autorización al enviar /start'}`,
         );
       } else {
         console.log(`[Telegram] Reintentando conexión en segundo plano: ${tgState.lastError}`);
       }
     } else {
-      console.log('[Telegram] Sin configurar aún. Define credenciales en credenciales.json o escribe: setup');
+      console.log('[Telegram] Sin configurar aún. Edita credenciales.json o escribe: setup');
     }
 
-    const envPairingPhone = process.env.WA_PAIRING_PHONE?.trim() || '';
-    if (envPairingPhone) {
-      this.saveWhatsAppPairingPhone(envPairingPhone);
+    const envPairingPhone = sanitizePairingPhoneNumber(process.env.WA_PAIRING_PHONE?.trim() || '') || '';
+    const pairingPhone = savedCreds.whatsappPairingPhone || envPairingPhone || undefined;
+    if (pairingPhone && pairingPhone !== savedCreds.whatsappPairingPhone) {
+      this.saveWhatsAppPairingPhone(pairingPhone);
     }
-    const pairingPhone = envPairingPhone || savedCreds.whatsappPairingPhone || undefined;
     const forceQrOnBoot = process.env.WA_AUTH_MODE === 'qr' && process.env.WA_AUTO_CONNECT === 'true';
+
+    console.log(
+      `[Credenciales] Archivo credenciales.json activo (Telegram: ${bootToken ? 'guardado' : 'pendiente'} | Chat ID: ${bootChatId || 'pendiente'} | WhatsApp: ${this.whatsapp.hasSavedSession() ? 'sesión guardada' : pairingPhone ? `+${pairingPhone}` : 'pendiente'})`,
+    );
 
     if (this.whatsapp.hasSavedSession()) {
       console.log('[WhatsApp] Sesión guardada detectada. Reconectando automáticamente...');

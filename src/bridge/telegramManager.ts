@@ -10,6 +10,8 @@ import {
   formatTelegramForwardText,
   formatTelegramHeader,
   formatTelegramMessageHtml,
+  getPrimaryChatId,
+  isTelegramChatAuthorized,
   maskToken,
   MAX_MEDIA_BYTES,
   normalizePhoneToJid,
@@ -92,6 +94,7 @@ export class TelegramManager {
   private reconnectTimer: ReturnType<typeof setTimeout> | null = null;
   private reconnectAttempts = 0;
   private callbackJidMap = new Map<string, string>();
+  private unauthorizedLogTimestamps = new Map<string, number>();
   private store: BridgeStore;
   private onStateChange: (state: TelegramPublicState) => void;
   private onReplyReceived: (payload: TelegramReplyPayload) => Promise<{ ok: boolean; detail: string }>;
@@ -192,7 +195,7 @@ export class TelegramManager {
     const cleanJid = jid.trim();
     const resolved = this.store.resolveContactName(cleanJid);
     const tgState = this.store.getTelegramState();
-    const targetChatId = (chatIdOverride || tgState.chatId || '').trim();
+    const targetChatId = (chatIdOverride || getPrimaryChatId(this.getConfiguredChatId()) || '').trim();
     const prevPinnedMsgId = tgState.pinnedStatusMessageId;
     const prevPinnedName = tgState.pinnedChatName;
 
@@ -242,7 +245,7 @@ export class TelegramManager {
     return { ok: true, state: next, note: pinWarning };
   }
 
-  async unpinContactChat(cardMessageId?: number): Promise<{
+  async unpinContactChat(cardMessageId?: number, chatIdOverride?: string): Promise<{
     hadPinned: boolean;
     previousName: string | null;
     state: TelegramPublicState;
@@ -251,7 +254,7 @@ export class TelegramManager {
     const hadPinned = Boolean(current.pinnedChatJid);
     const previousName = current.pinnedChatName ?? null;
     const msgIdToUnpin = cardMessageId ?? current.pinnedStatusMessageId ?? undefined;
-    const targetChatId = current.chatId;
+    const targetChatId = (chatIdOverride || getPrimaryChatId(this.getConfiguredChatId()) || '').trim();
 
     if (this.bot && current.status === 'connected' && targetChatId && msgIdToUnpin) {
       await this.bot.api.unpinChatMessage(targetChatId, msgIdToUnpin).catch(() => {});
@@ -337,6 +340,32 @@ export class TelegramManager {
     }
     this.onStateChange(next);
     return next;
+  }
+
+  private getConfiguredChatId(): string {
+    const stateChatId = this.store.getTelegramState().chatId.trim();
+    const credsChatId = this.store.credentials.get().telegramChatId.trim();
+    if (credsChatId && credsChatId !== stateChatId) {
+      this.lastChatId = credsChatId;
+      const synced = this.store.setTelegramState({ chatId: credsChatId });
+      this.onStateChange(synced);
+      return credsChatId;
+    }
+    return stateChatId || credsChatId || this.lastChatId || '';
+  }
+
+  private logUnauthorizedAttempt(
+    incomingChatId: string,
+    currentTargetChatId: string,
+    source: string,
+  ): void {
+    const now = Date.now();
+    const prev = this.unauthorizedLogTimestamps.get(incomingChatId) ?? 0;
+    if (now - prev < 30_000) return;
+    this.unauthorizedLogTimestamps.set(incomingChatId, now);
+    console.warn(
+      `[Telegram] ${source} bloqueado de Chat ID ${incomingChatId} (autorizado actual: ${currentTargetChatId}). Para autorizar este chat escribe en consola: tg chatid ${incomingChatId}  (o tg addchat ${incomingChatId})`,
+    );
   }
 
   private resolveTargetJidFromReply(replyTo: unknown): string | null {
@@ -497,8 +526,10 @@ export class TelegramManager {
 
       bot.command(['start', 'id'], async (ctx) => {
         const detectedId = String(ctx.chat.id);
-        if (!this.store.getTelegramState().chatId) {
+        let configuredChatId = this.getConfiguredChatId();
+        if (!configuredChatId) {
           this.setChatId(detectedId);
+          configuredChatId = detectedId;
         }
         const updated = this.store.setTelegramState({
           lastDetectedChatId: detectedId,
@@ -513,6 +544,16 @@ export class TelegramManager {
           }
         }
 
+        const isAuthorized = isTelegramChatAuthorized(detectedId, configuredChatId);
+        if (!isAuthorized) {
+          this.logUnauthorizedAttempt(detectedId, configuredChatId, '/start');
+          await ctx.reply(
+            `⚠️ <b>Este chat aún no está autorizado en Puente WA-TG</b>\n\nTu Chat ID detectado es: <code>${escapeHtml(detectedId)}</code>\nActualmente el puente responde a otro Chat ID configurado.\n\n<b>Cómo autorizar este chat:</b>\n• En la consola del servidor escribe:\n  <code>tg chatid ${escapeHtml(detectedId)}</code>\n• O añade este chat sin quitar el actual:\n  <code>tg addchat ${escapeHtml(detectedId)}</code>\n• También puedes actualizarlo en <code>credenciales.json</code> o en la pestaña <b>Conexiones</b> (botón "Usar detectado").`,
+            { parse_mode: 'HTML' },
+          );
+          return;
+        }
+
         const pinnedName = updated.pinnedChatName;
         await ctx.reply(
           `<b>⚡ Puente WA-TG activo</b>\n\nTu Chat ID es: <code>${escapeHtml(detectedId)}</code> (autorizado).\n${
@@ -524,9 +565,16 @@ export class TelegramManager {
 
       bot.on('callback_query:data', async (ctx) => {
         const incomingChatId = String(ctx.chat?.id ?? '');
-        const currentTargetChatId = this.store.getTelegramState().chatId;
-        if (currentTargetChatId && incomingChatId !== currentTargetChatId) {
-          await ctx.answerCallbackQuery({ text: 'Chat no autorizado.', show_alert: true });
+        const currentTargetChatId = this.getConfiguredChatId();
+        if (incomingChatId && incomingChatId !== this.store.getTelegramState().lastDetectedChatId) {
+          this.onStateChange(this.store.setTelegramState({ lastDetectedChatId: incomingChatId }));
+        }
+        if (currentTargetChatId && !isTelegramChatAuthorized(incomingChatId, currentTargetChatId)) {
+          this.logUnauthorizedAttempt(incomingChatId, currentTargetChatId, 'Botón');
+          await ctx.answerCallbackQuery({
+            text: `Chat no autorizado (tu ID: ${incomingChatId}). Usa "tg chatid ${incomingChatId}" en consola.`,
+            show_alert: true,
+          });
           return;
         }
 
@@ -544,7 +592,7 @@ export class TelegramManager {
         }
 
         if (data === 'unpin') {
-          const res = await this.unpinContactChat(ctx.callbackQuery.message?.message_id);
+          const res = await this.unpinContactChat(ctx.callbackQuery.message?.message_id, incomingChatId);
           await ctx.answerCallbackQuery({
             text: res.hadPinned ? `Chat desfijado (${res.previousName || ''})` : 'No había chat fijado',
           });
@@ -647,8 +695,8 @@ export class TelegramManager {
 
       bot.on('message_reaction', async (ctx) => {
         const incomingChatId = String(ctx.chat.id);
-        const currentTargetChatId = this.store.getTelegramState().chatId;
-        if (currentTargetChatId && incomingChatId !== currentTargetChatId) return;
+        const currentTargetChatId = this.getConfiguredChatId();
+        if (currentTargetChatId && !isTelegramChatAuthorized(incomingChatId, currentTargetChatId)) return;
         if (!this.onControlCommand) return;
 
         const mr = ctx.messageReaction;
@@ -668,7 +716,7 @@ export class TelegramManager {
 
       bot.on('message', async (ctx) => {
         const incomingChatId = String(ctx.chat.id);
-        let currentTargetChatId = this.store.getTelegramState().chatId;
+        let currentTargetChatId = this.getConfiguredChatId();
 
         if (!currentTargetChatId) {
           currentTargetChatId = incomingChatId;
@@ -679,8 +727,12 @@ export class TelegramManager {
           this.onStateChange(this.store.setTelegramState({ lastDetectedChatId: incomingChatId }));
         }
 
-        if (currentTargetChatId && incomingChatId !== currentTargetChatId) {
-          await ctx.reply('⛔ Este chat no está autorizado en Puente WA-TG.');
+        if (currentTargetChatId && !isTelegramChatAuthorized(incomingChatId, currentTargetChatId)) {
+          this.logUnauthorizedAttempt(incomingChatId, currentTargetChatId, 'Mensaje');
+          await ctx.reply(
+            `⛔ <b>Este chat no está autorizado en Puente WA-TG.</b>\n\nTu Chat ID es: <code>${escapeHtml(incomingChatId)}</code>\n\nSi deseas usar este chat:\n• Escribe en consola: <code>tg chatid ${escapeHtml(incomingChatId)}</code>\n• O añade este chat sin quitar el actual: <code>tg addchat ${escapeHtml(incomingChatId)}</code>\n• O actualízalo en <code>credenciales.json</code> / panel web (Conexiones).`,
+            { parse_mode: 'HTML' },
+          );
           return;
         }
 
@@ -1318,7 +1370,8 @@ export class TelegramManager {
     error?: string;
   }> {
     const state = this.store.getTelegramState();
-    if (!this.bot || state.status !== 'connected' || !state.chatId) {
+    const targetChatId = getPrimaryChatId(this.getConfiguredChatId() || state.chatId);
+    if (!this.bot || state.status !== 'connected' || !targetChatId) {
       return { delivered: false, error: 'Telegram no conectado' };
     }
 
@@ -1355,12 +1408,12 @@ export class TelegramManager {
         if (media.kind === 'image') {
           const sent =
             media.byteLength > TELEGRAM_PHOTO_MAX_BYTES
-              ? await this.bot.api.sendDocument(state.chatId, inputFile, {
+              ? await this.bot.api.sendDocument(targetChatId, inputFile, {
                   caption,
                   parse_mode: 'HTML',
                   reply_markup: keyboard,
                 })
-              : await this.bot.api.sendPhoto(state.chatId, inputFile, {
+              : await this.bot.api.sendPhoto(targetChatId, inputFile, {
                   caption,
                   parse_mode: 'HTML',
                   reply_markup: keyboard,
@@ -1369,12 +1422,12 @@ export class TelegramManager {
         }
         if (media.kind === 'audio') {
           const sent = media.ptt
-            ? await this.bot.api.sendVoice(state.chatId, inputFile, {
+            ? await this.bot.api.sendVoice(targetChatId, inputFile, {
                 caption,
                 parse_mode: 'HTML',
                 reply_markup: keyboard,
               })
-            : await this.bot.api.sendAudio(state.chatId, inputFile, {
+            : await this.bot.api.sendAudio(targetChatId, inputFile, {
                 caption,
                 parse_mode: 'HTML',
                 reply_markup: keyboard,
@@ -1382,7 +1435,7 @@ export class TelegramManager {
           return { delivered: true, telegramMessageId: sent.message_id };
         }
         if (media.kind === 'video') {
-          const sent = await this.bot.api.sendVideo(state.chatId, inputFile, {
+          const sent = await this.bot.api.sendVideo(targetChatId, inputFile, {
             caption,
             parse_mode: 'HTML',
             reply_markup: keyboard,
@@ -1390,7 +1443,7 @@ export class TelegramManager {
           return { delivered: true, telegramMessageId: sent.message_id };
         }
         if (media.kind === 'sticker') {
-          const stickerMsg = await this.bot.api.sendSticker(state.chatId, inputFile);
+          const stickerMsg = await this.bot.api.sendSticker(targetChatId, inputFile);
           const html = formatTelegramMessageHtml({
             senderName: params.senderName,
             phoneDisplay: params.phoneDisplay,
@@ -1401,7 +1454,7 @@ export class TelegramManager {
             hasCustomAlias: params.hasCustomAlias,
             tags: params.tags,
           });
-          const headerMsg = await this.bot.api.sendMessage(state.chatId, html, {
+          const headerMsg = await this.bot.api.sendMessage(targetChatId, html, {
             parse_mode: 'HTML',
             reply_parameters: { message_id: stickerMsg.message_id },
             reply_markup: keyboard,
@@ -1413,7 +1466,7 @@ export class TelegramManager {
           };
         }
 
-        const sent = await this.bot.api.sendDocument(state.chatId, inputFile, {
+        const sent = await this.bot.api.sendDocument(targetChatId, inputFile, {
           caption,
           parse_mode: 'HTML',
           reply_markup: keyboard,
@@ -1435,7 +1488,7 @@ export class TelegramManager {
         hasCustomAlias: params.hasCustomAlias,
         tags: params.tags,
       });
-      const sent = await this.bot.api.sendMessage(state.chatId, html, {
+      const sent = await this.bot.api.sendMessage(targetChatId, html, {
         parse_mode: 'HTML',
         reply_markup: keyboard,
       });
@@ -1444,7 +1497,7 @@ export class TelegramManager {
       // Plain text fallback if HTML fails
       try {
         const formatted = formatTelegramForwardText(params);
-        const sent = await this.bot.api.sendMessage(state.chatId, formatted, {
+        const sent = await this.bot.api.sendMessage(targetChatId, formatted, {
           reply_markup: keyboard,
         });
         return { delivered: true, telegramMessageId: sent.message_id };
@@ -1476,7 +1529,8 @@ export class TelegramManager {
     lastReactionNotice?: string;
   }): Promise<boolean> {
     const state = this.store.getTelegramState();
-    if (!this.bot || state.status !== 'connected' || !state.chatId) {
+    const targetChatId = getPrimaryChatId(this.getConfiguredChatId() || state.chatId);
+    if (!this.bot || state.status !== 'connected' || !targetChatId) {
       return false;
     }
 
@@ -1500,7 +1554,7 @@ export class TelegramManager {
           reactions: params.reactions,
           lastReactionNotice: params.lastReactionNotice,
         });
-        await this.bot.api.editMessageCaption(state.chatId, params.telegramMessageId, {
+        await this.bot.api.editMessageCaption(targetChatId, params.telegramMessageId, {
           caption,
           parse_mode: 'HTML',
           reply_markup: keyboard,
@@ -1518,7 +1572,7 @@ export class TelegramManager {
           reactions: params.reactions,
           lastReactionNotice: params.lastReactionNotice,
         });
-        await this.bot.api.editMessageText(state.chatId, params.telegramMessageId, html, {
+        await this.bot.api.editMessageText(targetChatId, params.telegramMessageId, html, {
           parse_mode: 'HTML',
           reply_markup: keyboard,
         });
@@ -1531,13 +1585,14 @@ export class TelegramManager {
 
   async sendTestNotification(): Promise<{ ok: boolean; error?: string; telegramMessageId?: number }> {
     const state = this.store.getTelegramState();
-    if (!this.bot || state.status !== 'connected' || !state.chatId) {
+    const targetChatId = getPrimaryChatId(this.getConfiguredChatId() || state.chatId);
+    if (!this.bot || state.status !== 'connected' || !targetChatId) {
       return { ok: false, error: 'Conecta primero el Bot Token y el Chat ID de Telegram.' };
     }
 
     try {
       const sent = await this.bot.api.sendMessage(
-        state.chatId,
+        targetChatId,
         '<b>✅ Prueba de conexión exitosa</b> desde Puente WA-TG. Los mensajes privados de WhatsApp llegarán aquí.',
         { parse_mode: 'HTML' },
       );
@@ -1552,15 +1607,16 @@ export class TelegramManager {
 
   async sendSystemNotice(text: string): Promise<boolean> {
     const state = this.store.getTelegramState();
-    if (!this.bot || state.status !== 'connected' || !state.chatId) {
+    const targetChatId = getPrimaryChatId(this.getConfiguredChatId() || state.chatId);
+    if (!this.bot || state.status !== 'connected' || !targetChatId) {
       return false;
     }
     try {
-      await this.bot.api.sendMessage(state.chatId, text, { parse_mode: 'HTML' });
+      await this.bot.api.sendMessage(targetChatId, text, { parse_mode: 'HTML' });
       return true;
     } catch {
       try {
-        await this.bot.api.sendMessage(state.chatId, text);
+        await this.bot.api.sendMessage(targetChatId, text);
         return true;
       } catch {
         return false;

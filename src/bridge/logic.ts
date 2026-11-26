@@ -361,13 +361,35 @@ export function validateBotTokenFormat(token: string): string | undefined {
   return undefined;
 }
 
+export function parseAuthorizedChatIds(raw: string): string[] {
+  if (!raw || typeof raw !== 'string') return [];
+  const parts = raw
+    .split(/[\s,;]+/)
+    .map((item) => item.trim())
+    .filter(Boolean);
+  return [...new Set(parts)];
+}
+
+export function getPrimaryChatId(raw: string): string {
+  return parseAuthorizedChatIds(raw)[0] ?? '';
+}
+
+export function isTelegramChatAuthorized(incomingChatId: string, configuredChatId: string): boolean {
+  const incoming = incomingChatId.trim();
+  if (!incoming) return false;
+  const allowed = parseAuthorizedChatIds(configuredChatId);
+  if (allowed.length === 0) return true;
+  return allowed.includes(incoming);
+}
+
 export function validateChatIdFormat(chatId: string): string | undefined {
-  const trimmedChatId = chatId.trim();
-  if (!trimmedChatId) {
+  const ids = parseAuthorizedChatIds(chatId);
+  if (ids.length === 0) {
     return 'Ingresa tu Chat ID numérico de Telegram.';
   }
-  if (!/^-?\d{4,20}$/.test(trimmedChatId)) {
-    return 'El Chat ID debe ser un número entero (ej. 518294012 o -100...).';
+  const invalid = ids.find((id) => !/^-?\d{4,20}$/.test(id));
+  if (invalid) {
+    return 'El Chat ID debe ser un número entero (ej. 518294012 o -100..., o varios separados por coma).';
   }
   return undefined;
 }

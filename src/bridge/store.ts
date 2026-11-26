@@ -305,7 +305,7 @@ export class BridgeStore {
     this.data = this.loadFromDisk();
     const savedCreds = this.credentials.get();
     this.tgState.chatId =
-      process.env.TELEGRAM_CHAT_ID?.trim() || savedCreds.telegramChatId || this.data.telegramChatId || '';
+      savedCreds.telegramChatId || process.env.TELEGRAM_CHAT_ID?.trim() || this.data.telegramChatId || '';
     const pinnedJid = this.data.pinnedChatJid || null;
     this.tgState.pinnedChatJid = pinnedJid;
     this.tgState.pinnedChatName = pinnedJid ? this.resolveContactName(pinnedJid).displayName : null;

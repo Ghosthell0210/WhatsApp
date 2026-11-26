@@ -218,7 +218,7 @@ test('startInitialWizardIfNeeded skips wizard when both Telegram and WhatsApp ar
 test('startInitialWizardIfNeeded skips Telegram prompt when saved credenciales.json already has token', () => {
   const { adapter } = createMockAdapter({
     telegramConnected: false,
-    whatsappConnected: true,
+    whatsappConnected: false,
     hasSavedCreds: true,
   });
   const controller = new ConsoleSessionController(adapter, () => {});
@@ -279,6 +279,28 @@ test('ConsoleSessionController handles pausar, reanudar, bloquear, and desbloque
 
   await controller.handleLine('desbloquear 5491155551234');
   assert.deepEqual(adapter.getPublicState().rules.blockedJids, []);
+});
+
+test('ConsoleSessionController handles tg chatid and tg addchat commands', async () => {
+  const logs: string[] = [];
+  const { adapter, calls } = createMockAdapter({ telegramConnected: true, whatsappConnected: true });
+  const controller = new ConsoleSessionController(adapter, (msg) => logs.push(msg));
+
+  assert.deepEqual(parseConsoleCommand('tg chatid 1981484200'), {
+    type: 'tg_set_chat_id',
+    chatId: '1981484200',
+  });
+  assert.deepEqual(parseConsoleCommand('tg addchat -1001234567890'), {
+    type: 'tg_add_chat_id',
+    chatId: '-1001234567890',
+  });
+
+  await controller.handleLine('tg chatid 1981484200');
+  assert.equal(adapter.getPublicState().telegram.chatId, '1981484200');
+
+  await controller.handleLine('tg addchat -1001234567890');
+  assert.equal(adapter.getPublicState().telegram.chatId, '1981484200, -1001234567890');
+  assert.equal(calls.filter((c) => c.fn === 'setTelegramChatId').length, 2);
 });
 
 test('renderQrToTerminal produces printable ASCII QR matrix', async () => {

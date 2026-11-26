@@ -15,6 +15,7 @@ import makeWASocket, {
 } from '@whiskeysockets/baileys';
 import {
   extractMediaMetadata,
+  extractRawNumberFromJid,
   extractWhatsAppMessageText,
   extractWhatsAppReaction,
   formatByteSize,
@@ -304,6 +305,10 @@ export class WhatsAppManager {
           pairingConfirmed = true;
           const userJid = sock.user?.id ? jidNormalizedUser(sock.user.id) : null;
           const phone = userJid ? formatPhoneDisplay(userJid) : null;
+          const phoneDigits = userJid ? extractRawNumberFromJid(userJid) : '';
+          if (phoneDigits && !this.store.credentials.get().whatsappPairingPhone) {
+            this.store.credentials.save({ whatsappPairingPhone: phoneDigits });
+          }
           console.log(`[WhatsApp] Conectado correctamente (${phone || 'sesión activa'}).`);
           const next = this.store.setWhatsAppState({
             status: 'connected',
