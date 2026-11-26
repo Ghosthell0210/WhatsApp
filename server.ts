@@ -139,6 +139,9 @@ async function startServer() {
     if (typeof body.paused === 'boolean') {
       nextPartial.paused = body.paused;
     }
+    if (typeof body.reactionsEnabled === 'boolean') {
+      nextPartial.reactionsEnabled = body.reactionsEnabled;
+    }
     if (Array.isArray(body.blockedJids)) {
       const normalized = body.blockedJids
         .map((item: unknown) => (typeof item === 'string' ? normalizePhoneToJid(item) : null))
@@ -167,6 +170,7 @@ async function startServer() {
       res.status(404).json({ ok: false, message: 'Conversación no encontrada.' });
       return;
     }
+    broadcast({ type: 'conversation:updated', payload: updated });
     res.json({ ok: true, conversation: updated });
   });
 
@@ -177,18 +181,18 @@ async function startServer() {
       return;
     }
     const count = coordinator.store.importVcf(vcfText);
-    res.json({ ok: true, importedCount: count, state: coordinator.getPublicState() });
+    const nextState = coordinator.getPublicState();
+    broadcast({ type: 'state:sync', payload: nextState });
+    res.json({ ok: true, importedCount: count, state: nextState });
   });
 
   app.patch('/api/contacts/:jid/alias', (req, res) => {
     const jid = decodeURIComponent(req.params.jid || '');
     const alias = typeof req.body?.alias === 'string' ? req.body.alias : '';
     const updated = coordinator.store.setContactAlias(jid, alias);
-    if (!updated) {
-      res.status(404).json({ ok: false, message: 'Contacto no encontrado.' });
-      return;
-    }
-    res.json({ ok: true, contact: updated, state: coordinator.getPublicState() });
+    const nextState = coordinator.getPublicState();
+    broadcast({ type: 'state:sync', payload: nextState });
+    res.json({ ok: true, contact: updated, state: nextState });
   });
 
   app.delete('/api/contacts/:jid', (req, res) => {
@@ -198,7 +202,9 @@ async function startServer() {
       res.status(404).json({ ok: false, message: 'Contacto no encontrado.' });
       return;
     }
-    res.json({ ok: true, state: coordinator.getPublicState() });
+    const nextState = coordinator.getPublicState();
+    broadcast({ type: 'state:sync', payload: nextState });
+    res.json({ ok: true, state: nextState });
   });
 
   app.post('/api/messages/reply', async (req, res) => {
@@ -268,24 +274,45 @@ async function startServer() {
 
   // Frontend middleware / static serving
   const distDir = path.resolve(process.cwd(), 'dist');
-  let hasDistBuild = fs.existsSync(path.join(distDir, 'index.html'));
-  if (!hasDistBuild) {
-    try {
-      console.log('[Puente WA-TG] Compilando interfaz web (vite build) en primer inicio...');
-      execSync('npx vite build', { stdio: 'inherit' });
-      hasDistBuild = fs.existsSync(path.join(distDir, 'index.html'));
-    } catch (err) {
-      console.warn('[Puente WA-TG] Aviso: no se pudo compilar vite build automáticamente:', err);
-    }
-  }
-
   const isProd = process.env.NODE_ENV === 'production';
   const isConsoleOnly =
     process.argv.includes('--console') ||
     process.env.HEADLESS === 'true' ||
     Boolean(process.env.P_SERVER_UUID);
 
-  if (hasDistBuild) {
+  const getNewestMtime = (dirPath: string): number => {
+    if (!fs.existsSync(dirPath)) return 0;
+    const st = fs.statSync(dirPath);
+    if (!st.isDirectory()) return st.mtimeMs;
+    let max = st.mtimeMs;
+    for (const entry of fs.readdirSync(dirPath)) {
+      if (entry === 'node_modules' || entry === 'dist' || entry === 'data') continue;
+      const full = path.join(dirPath, entry);
+      const childMax = getNewestMtime(full);
+      if (childMax > max) max = childMax;
+    }
+    return max;
+  };
+
+  let hasDistBuild = fs.existsSync(path.join(distDir, 'index.html'));
+  if (isProd || isConsoleOnly) {
+    const distMtime = hasDistBuild ? fs.statSync(path.join(distDir, 'index.html')).mtimeMs : 0;
+    const srcMtime = Math.max(
+      getNewestMtime(path.resolve(process.cwd(), 'src')),
+      getNewestMtime(path.resolve(process.cwd(), 'index.html')),
+    );
+    if (!hasDistBuild || srcMtime > distMtime) {
+      try {
+        console.log('[Puente WA-TG] Compilando interfaz web actualizada (vite build)...');
+        execSync('npx vite build', { stdio: 'inherit' });
+        hasDistBuild = fs.existsSync(path.join(distDir, 'index.html'));
+      } catch (err) {
+        console.warn('[Puente WA-TG] Aviso: no se pudo compilar vite build automáticamente:', err);
+      }
+    }
+  }
+
+  if ((isProd || isConsoleOnly) && hasDistBuild) {
     app.use(express.static(distDir));
     app.get('*', (_req, res) => {
       res.sendFile(path.join(distDir, 'index.html'));

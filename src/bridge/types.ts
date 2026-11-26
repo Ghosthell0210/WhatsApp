@@ -42,6 +42,13 @@ export interface MessageReaction {
   senders: string[];
 }
 
+export interface WhatsAppMessageKeyRef {
+  remoteJid: string;
+  id: string;
+  fromMe?: boolean;
+  participant?: string;
+}
+
 export interface BridgeMessage {
   id: string;
   jid: string;
@@ -52,6 +59,8 @@ export interface BridgeMessage {
   mediaType: MediaKind;
   timestamp: number;
   telegramMessageId?: number;
+  whatsappMessageId?: string;
+  whatsappKey?: WhatsAppMessageKeyRef;
   replyToText?: string;
   isSample?: boolean;
   deliveryStatus: 'delivered_tg' | 'sent_wa' | 'simulated' | 'pending' | 'failed';
@@ -67,6 +76,7 @@ export interface BridgeConversation {
   lastDirection: MessageDirection;
   unreadCount: number;
   lastTelegramMessageId?: number;
+  pinnedTelegramMessageId?: number;
   isSample?: boolean;
   archived?: boolean;
   messages: BridgeMessage[];
@@ -154,4 +164,7 @@ export type BridgeWsEvent =
   | { type: 'tg:status'; payload: TelegramPublicState }
   | { type: 'rules:updated'; payload: RoutingRules }
   | { type: 'message:new'; payload: { conversation: BridgeConversation; message: BridgeMessage; stats: BridgeStats } }
+  | { type: 'message:updated'; payload: { conversation: BridgeConversation; message: BridgeMessage } }
+  | { type: 'conversation:updated'; payload: BridgeConversation }
+  | { type: 'contacts:updated'; payload: BridgeContact[] }
   | { type: 'log:new'; payload: { entry: AuditLogEntry; stats: BridgeStats } };

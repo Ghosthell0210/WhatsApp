@@ -7,10 +7,14 @@ import {
   normalizePhoneToJid,
   extractWhatsAppMessageText,
   extractMediaMetadata,
+  extractWhatsAppReaction,
   formatByteSize,
+  formatReactionsSummary,
   formatTelegramForwardText,
   formatTelegramMediaCaption,
+  formatTelegramMessageHtml,
   parseTelegramReplyCommand,
+  parseVcfContacts,
   validateTelegramConfigInput,
   maskToken,
   sanitizePairingPhoneNumber,
@@ -183,4 +187,69 @@ test('sanitizePairingPhoneNumber and formatPairingCode normalize phone digits an
   assert.equal(sanitizePairingPhoneNumber('12345'), null);
   assert.equal(formatPairingCode('ab12cd34'), 'AB12-CD34');
 });
+
+test('parseVcfContacts extracts names and normalizes phone numbers', () => {
+  const vcf = [
+    'BEGIN:VCARD',
+    'VERSION:3.0',
+    'FN;CHARSET=UTF-8:Carlos Ruiz',
+    'TEL;TYPE=CELL:+53 5 694-2234',
+    'END:VCARD',
+    'BEGIN:VCARD',
+    'N:Gómez;Ana;;;',
+    'TEL:+54 9 11 4444-5555',
+    'END:VCARD',
+  ].join('\n');
+
+  const parsed = parseVcfContacts(vcf);
+  assert.equal(parsed.length, 2);
+  assert.deepEqual(parsed[0], {
+    fullName: 'Carlos Ruiz',
+    phone: '+5356942234',
+    jid: '5356942234@s.whatsapp.net',
+  });
+  assert.deepEqual(parsed[1], {
+    fullName: 'Ana Gómez',
+    phone: '+5491144445555',
+    jid: '5491144445555@s.whatsapp.net',
+  });
+});
+
+test('formatTelegramMessageHtml renders media badge, missing profile notice, and reaction counter', () => {
+  const html = formatTelegramMessageHtml({
+    senderName: '+5491155551234',
+    phoneDisplay: '+5491155551234',
+    text: 'Hola <mundo>',
+    mediaType: 'image',
+    includePhoneHeader: true,
+    hasProfileName: false,
+    hasCustomAlias: false,
+    reactions: [
+      { emoji: '❤️', count: 3, senders: ['a', 'b', 'c'] },
+      { emoji: '👍', count: 1, senders: ['d'] },
+    ],
+    lastReactionNotice: 'reacción ❤️ puesta',
+  });
+  assert.ok(html.includes('<b>📷 Foto · +5491155551234</b>'));
+  assert.ok(html.includes('Sin nombre de perfil'));
+  assert.ok(html.includes('Hola &lt;mundo&gt;'));
+  assert.ok(html.includes('❤️ x3 · 👍'));
+  assert.equal(formatReactionsSummary([{ emoji: '🔥', count: 2, senders: ['a', 'b'] }]), '🔥 x2');
+});
+
+test('extractWhatsAppReaction extracts reaction target id and emoji or removal', () => {
+  assert.deepEqual(
+    extractWhatsAppReaction({
+      reactionMessage: { key: { id: 'MSG123', fromMe: false }, text: '❤️' },
+    }),
+    { targetMessageId: 'MSG123', emoji: '❤️', fromMe: false },
+  );
+  assert.deepEqual(
+    extractWhatsAppReaction({
+      reactionMessage: { key: { id: 'MSG123', fromMe: false }, text: '' },
+    }),
+    { targetMessageId: 'MSG123', emoji: '', fromMe: false },
+  );
+});
+
 

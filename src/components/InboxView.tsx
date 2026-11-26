@@ -1,25 +1,39 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import {
+  AlertTriangle,
+  Archive,
+  ArchiveRestore,
   ArrowLeft,
   FileText,
   Film,
   Image as ImageIcon,
+  Info,
   MapPin,
   Mic,
   Search,
   Send,
   Smile,
+  Tag,
   Trash2,
   User,
+  X,
 } from 'lucide-react';
-import type { BridgeConversation, BridgeMessage, BridgeStats, WhatsAppPublicState } from '../bridge/types';
+import type {
+  BridgeContact,
+  BridgeConversation,
+  BridgeMessage,
+  BridgeStats,
+  WhatsAppPublicState,
+} from '../bridge/types';
 
 interface InboxViewProps {
   conversations: BridgeConversation[];
+  contacts: BridgeContact[];
   stats: BridgeStats;
   whatsapp: WhatsAppPublicState;
   loading: boolean;
   onSelectConversation: (jid: string) => void;
+  onToggleArchive: (jid: string) => Promise<unknown>;
   onSendReply: (
     jid: string,
     text: string,
@@ -29,7 +43,7 @@ interface InboxViewProps {
   onOpenTestModal: () => void;
 }
 
-type InboxFilter = 'all' | 'unread' | 'real';
+type InboxFilter = 'all' | 'unread' | 'archived' | 'real';
 
 function formatTime(ts: number): string {
   return new Date(ts).toLocaleTimeString('es-ES', {
@@ -73,10 +87,12 @@ function mediaIndicator(mediaType: BridgeMessage['mediaType']): {
 
 export function InboxView({
   conversations,
+  contacts,
   stats,
   whatsapp,
   loading,
   onSelectConversation,
+  onToggleArchive,
   onSendReply,
   onClearSamples,
   onOpenTestModal,
@@ -89,23 +105,40 @@ export function InboxView({
   const [sending, setSending] = useState(false);
   const [sendFeedback, setSendFeedback] = useState<string | null>(null);
   const [mobileShowThread, setMobileShowThread] = useState(false);
+  const [showContactModal, setShowContactModal] = useState(false);
   const messagesEndRef = useRef<HTMLDivElement | null>(null);
 
   const hasSamples = useMemo(() => conversations.some((c) => c.isSample), [conversations]);
 
+  const contactsMap = useMemo(() => {
+    const map = new Map<string, BridgeContact>();
+    for (const c of contacts) {
+      map.set(c.jid, c);
+    }
+    return map;
+  }, [contacts]);
+
   const filteredConversations = useMemo(() => {
     const q = searchQuery.trim().toLowerCase();
     return conversations.filter((conv) => {
+      if (filter === 'archived') {
+        if (!conv.archived) return false;
+      } else if (!q && conv.archived) {
+        return false;
+      }
       if (filter === 'unread' && conv.unreadCount === 0) return false;
       if (filter === 'real' && conv.isSample) return false;
       if (!q) return true;
+      const contact = contactsMap.get(conv.jid);
       return (
         conv.name.toLowerCase().includes(q) ||
         conv.phoneDisplay.toLowerCase().includes(q) ||
-        conv.lastMessageText.toLowerCase().includes(q)
+        conv.lastMessageText.toLowerCase().includes(q) ||
+        Boolean(contact?.customAlias?.toLowerCase().includes(q)) ||
+        Boolean(contact?.profileName?.toLowerCase().includes(q))
       );
     });
-  }, [conversations, filter, searchQuery]);
+  }, [contactsMap, conversations, filter, searchQuery]);
 
   const activeConversation = useMemo(() => {
     if (selectedJid) {
@@ -280,6 +313,19 @@ export function InboxView({
                 >
                   Solo reales
                 </button>
+                <button
+                  type="button"
+                  role="tab"
+                  aria-selected={filter === 'archived'}
+                  onClick={() => setFilter('archived')}
+                  className={`px-2.5 py-1 text-xs font-medium rounded-md transition-colors whitespace-nowrap ${
+                    filter === 'archived'
+                      ? 'bg-white text-slate-900 shadow-xs'
+                      : 'text-slate-600 hover:text-slate-900'
+                  }`}
+                >
+                  Archivados
+                </button>
               </div>
 
               {hasSamples && (
@@ -377,9 +423,21 @@ export function InboxView({
                     <ArrowLeft className="w-4 h-4" />
                   </button>
                   <div className="min-w-0">
-                    <h2 className="font-display text-sm sm:text-base font-semibold text-slate-900 truncate">
-                      {activeConversation.name}
-                    </h2>
+                    <div className="flex items-center gap-2">
+                      <h2 className="font-display text-sm sm:text-base font-semibold text-slate-900 truncate">
+                        {activeConversation.name}
+                      </h2>
+                      {contactsMap.get(activeConversation.jid)?.noProfileNameWarn &&
+                        !contactsMap.get(activeConversation.jid)?.customAlias && (
+                          <span
+                            title="Contacto sin nombre de perfil en WhatsApp"
+                            className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded bg-amber-50 text-amber-800 border border-amber-200 text-[10px] font-medium shrink-0"
+                          >
+                            <AlertTriangle className="w-3 h-3" />
+                            Sin nombre
+                          </span>
+                        )}
+                    </div>
                     <div className="flex flex-wrap items-center gap-x-2 gap-y-0.5 text-xs text-slate-500">
                       <span className="font-mono tabular-nums">{activeConversation.phoneDisplay}</span>
                       <span aria-hidden="true">·</span>
@@ -396,12 +454,41 @@ export function InboxView({
                   </div>
                 </div>
 
-                <div className="hidden sm:block text-right text-xs text-slate-500 shrink-0">
-                  {whatsapp.status === 'connected' ? (
-                    <span className="text-emerald-700 font-medium">Envío directo WA activo</span>
-                  ) : (
-                    <span>Modo registro local</span>
-                  )}
+                <div className="flex items-center gap-2 shrink-0">
+                  <button
+                    type="button"
+                    onClick={() => setShowContactModal(true)}
+                    title="Ver ficha e historial del contacto"
+                    className="inline-flex items-center gap-1.5 px-2.5 py-1.5 text-xs font-medium text-slate-700 bg-slate-100 hover:bg-slate-200 rounded-lg transition-colors"
+                  >
+                    <Info className="w-3.5 h-3.5" />
+                    <span className="hidden sm:inline">Ficha</span>
+                  </button>
+                  <button
+                    type="button"
+                    onClick={() => void onToggleArchive(activeConversation.jid)}
+                    title={activeConversation.archived ? 'Restaurar conversación' : 'Archivar conversación'}
+                    className="inline-flex items-center gap-1.5 px-2.5 py-1.5 text-xs font-medium text-slate-700 bg-slate-100 hover:bg-slate-200 rounded-lg transition-colors"
+                  >
+                    {activeConversation.archived ? (
+                      <>
+                        <ArchiveRestore className="w-3.5 h-3.5 text-teal-700" />
+                        <span className="hidden sm:inline">Restaurar</span>
+                      </>
+                    ) : (
+                      <>
+                        <Archive className="w-3.5 h-3.5" />
+                        <span className="hidden sm:inline">Archivar</span>
+                      </>
+                    )}
+                  </button>
+                  <div className="hidden md:block text-right text-xs text-slate-500 pl-2 border-l border-slate-200">
+                    {whatsapp.status === 'connected' ? (
+                      <span className="text-emerald-700 font-medium">WA activo</span>
+                    ) : (
+                      <span>Registro local</span>
+                    )}
+                  </div>
                 </div>
               </div>
 
@@ -438,6 +525,23 @@ export function InboxView({
                         <p className="text-sm leading-relaxed whitespace-pre-wrap break-words">
                           {msg.text}
                         </p>
+                        {msg.reactions && msg.reactions.length > 0 && (
+                          <div className="mt-2 flex flex-wrap gap-1.5">
+                            {msg.reactions.map((rx) => (
+                              <span
+                                key={rx.emoji}
+                                className="inline-flex items-center gap-1 px-2 py-0.5 rounded-md bg-slate-100 text-slate-800 text-xs font-medium border border-slate-200"
+                              >
+                                <span>{rx.emoji}</span>
+                                {rx.count > 1 && (
+                                  <span className="font-mono tabular-nums text-[11px] text-slate-600">
+                                    x{rx.count}
+                                  </span>
+                                )}
+                              </span>
+                            ))}
+                          </div>
+                        )}
                       </div>
                       <div className="mt-1 px-1 flex items-center gap-1.5 text-[11px] text-slate-500">
                         <span>
@@ -556,6 +660,79 @@ export function InboxView({
           )}
         </div>
       </section>
+
+      {showContactModal && activeConversation && (
+        <div
+          role="dialog"
+          aria-modal="true"
+          aria-label="Ficha del contacto"
+          className="fixed inset-0 z-50 flex items-center justify-center bg-slate-900/50 p-4"
+        >
+          <div className="bg-white rounded-2xl border border-slate-200 max-w-md w-full p-6 space-y-4 shadow-xl">
+            <div className="flex items-start justify-between gap-3">
+              <div>
+                <h3 className="font-display text-lg font-bold text-slate-900">
+                  {activeConversation.name}
+                </h3>
+                <p className="font-mono text-xs text-slate-500">{activeConversation.phoneDisplay}</p>
+              </div>
+              <button
+                type="button"
+                onClick={() => setShowContactModal(false)}
+                className="p-1 text-slate-400 hover:text-slate-700 rounded-lg"
+              >
+                <X className="w-4 h-4" />
+              </button>
+            </div>
+
+            {(() => {
+              const c = contactsMap.get(activeConversation.jid);
+              const inboundCount = activeConversation.messages.filter((m) => m.direction === 'inbound_wa').length;
+              const outboundCount = activeConversation.messages.length - inboundCount;
+              return (
+                <div className="space-y-3 text-sm">
+                  <div className="p-3 rounded-xl bg-slate-50 border border-slate-200 space-y-1.5 text-xs">
+                    <div className="flex justify-between">
+                      <span className="text-slate-500">JID interno:</span>
+                      <span className="font-mono text-slate-800">{activeConversation.jid}</span>
+                    </div>
+                    <div className="flex justify-between">
+                      <span className="text-slate-500">Nombre de perfil WA:</span>
+                      <span className="text-slate-800 font-medium">
+                        {c?.profileName || 'Sin nombre de perfil'}
+                      </span>
+                    </div>
+                    <div className="flex justify-between">
+                      <span className="text-slate-500">Alias manual (/nuevo):</span>
+                      <span className="text-slate-800 font-medium">{c?.customAlias || '—'}</span>
+                    </div>
+                    <div className="flex justify-between">
+                      <span className="text-slate-500">Mensajes recibidos / enviados:</span>
+                      <span className="font-mono tabular-nums text-slate-800">
+                        {inboundCount} / {outboundCount}
+                      </span>
+                    </div>
+                  </div>
+
+                  {c?.tags && c.tags.length > 0 && (
+                    <div className="flex flex-wrap gap-1.5">
+                      {c.tags.map((t) => (
+                        <span
+                          key={t}
+                          className="inline-flex items-center gap-1 px-2 py-0.5 rounded-md bg-teal-50 text-teal-800 text-xs font-medium"
+                        >
+                          <Tag className="w-3 h-3" />
+                          {t}
+                        </span>
+                      ))}
+                    </div>
+                  )}
+                </div>
+              );
+            })()}
+          </div>
+        </div>
+      )}
     </div>
   );
 }

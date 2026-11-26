@@ -16,6 +16,7 @@ import makeWASocket, {
 import {
   extractMediaMetadata,
   extractWhatsAppMessageText,
+  extractWhatsAppReaction,
   formatByteSize,
   formatPairingCode,
   formatPhoneDisplay,
@@ -24,7 +25,12 @@ import {
   sanitizePairingPhoneNumber,
 } from './logic';
 import type { BridgeStore } from './store';
-import type { MediaKind, WhatsAppMediaPayload, WhatsAppPublicState } from './types';
+import type {
+  MediaKind,
+  WhatsAppMediaPayload,
+  WhatsAppMessageKeyRef,
+  WhatsAppPublicState,
+} from './types';
 
 const AUTH_DIR = path.resolve(process.cwd(), 'data/wa-auth');
 export const TMP_MEDIA_DIR = path.resolve(process.cwd(), 'data/tmp-media');
@@ -60,6 +66,15 @@ export interface WhatsAppInboundPayload {
   text: string;
   mediaType: MediaKind;
   media?: WhatsAppMediaPayload;
+  whatsappMessageId?: string;
+  whatsappKey?: WhatsAppMessageKeyRef;
+}
+
+export interface WhatsAppInboundReactionPayload {
+  jid: string;
+  senderJid: string;
+  targetMessageId: string;
+  emoji: string;
 }
 
 export interface WhatsAppConnectOptions {
@@ -76,16 +91,19 @@ export class WhatsAppManager {
   private store: BridgeStore;
   private onStateChange: (state: WhatsAppPublicState) => void;
   private onIncomingMessage: (payload: WhatsAppInboundPayload) => Promise<void>;
+  private onIncomingReaction?: (payload: WhatsAppInboundReactionPayload) => Promise<void>;
   private settleWaiters = new Set<() => void>();
 
   constructor(params: {
     store: BridgeStore;
     onStateChange: (state: WhatsAppPublicState) => void;
     onIncomingMessage: (payload: WhatsAppInboundPayload) => Promise<void>;
+    onIncomingReaction?: (payload: WhatsAppInboundReactionPayload) => Promise<void>;
   }) {
     this.store = params.store;
     this.onStateChange = params.onStateChange;
     this.onIncomingMessage = params.onIncomingMessage;
+    this.onIncomingReaction = params.onIncomingReaction;
     cleanupTempMediaDir();
   }
 
@@ -357,6 +375,17 @@ export class WhatsAppManager {
           const normalizedJid = rawJid.endsWith('@s.whatsapp.net') ? jidNormalizedUser(rawJid) : rawJid;
 
           const messageObj = msg.message as Record<string, unknown> | null | undefined;
+          const reactionInfo = extractWhatsAppReaction(messageObj);
+          if (reactionInfo && this.onIncomingReaction) {
+            await this.onIncomingReaction({
+              jid: normalizedJid,
+              senderJid: msg.key.participant || normalizedJid,
+              targetMessageId: reactionInfo.targetMessageId,
+              emoji: reactionInfo.emoji,
+            });
+            continue;
+          }
+
           const extracted = extractWhatsAppMessageText(messageObj);
           if (!extracted.text) continue;
 
@@ -413,7 +442,15 @@ export class WhatsAppManager {
             }
           }
 
-          const senderName = msg.pushName?.trim() || formatPhoneDisplay(normalizedJid);
+          const senderName = msg.pushName?.trim() || '';
+          const whatsappKey: WhatsAppMessageKeyRef | undefined = msg.key.id
+            ? {
+                remoteJid: normalizedJid,
+                id: msg.key.id,
+                fromMe: Boolean(msg.key.fromMe),
+                participant: msg.key.participant || undefined,
+              }
+            : undefined;
           try {
             await this.onIncomingMessage({
               jid: normalizedJid,
@@ -421,6 +458,8 @@ export class WhatsAppManager {
               text: finalText,
               mediaType: extracted.mediaType,
               media: mediaPayload,
+              whatsappMessageId: msg.key.id ?? undefined,
+              whatsappKey,
             });
           } finally {
             if (mediaPayload?.tempFilePath) {
@@ -511,41 +550,101 @@ export class WhatsAppManager {
     });
   }
 
-  async sendTextMessage(jid: string, text: string): Promise<{ sentOverNetwork: boolean }> {
+  async sendTextMessage(
+    jid: string,
+    text: string,
+  ): Promise<{ sentOverNetwork: boolean; whatsappMessageId?: string; whatsappKey?: WhatsAppMessageKeyRef; error?: string }> {
     if (!this.sock || this.store.getWhatsAppState().status !== 'connected') {
-      return { sentOverNetwork: false };
+      return { sentOverNetwork: false, error: 'WhatsApp no está conectado.' };
     }
-    await this.sock.sendMessage(jid, { text });
-    return { sentOverNetwork: true };
+    try {
+      const sent = await this.sock.sendMessage(jid, { text });
+      const key = sent?.key?.id
+        ? {
+            remoteJid: jid,
+            id: sent.key.id,
+            fromMe: true,
+          }
+        : undefined;
+      return { sentOverNetwork: true, whatsappMessageId: sent?.key?.id ?? undefined, whatsappKey: key };
+    } catch (err) {
+      return {
+        sentOverNetwork: false,
+        error: err instanceof Error ? err.message : 'Error al enviar texto a WhatsApp',
+      };
+    }
   }
 
-  async sendMediaMessage(jid: string, media: WhatsAppMediaPayload): Promise<{ sentOverNetwork: boolean }> {
+  async sendMediaMessage(
+    jid: string,
+    media: WhatsAppMediaPayload,
+  ): Promise<{ sentOverNetwork: boolean; whatsappMessageId?: string; whatsappKey?: WhatsAppMessageKeyRef; error?: string }> {
     if (!this.sock || this.store.getWhatsAppState().status !== 'connected') {
-      return { sentOverNetwork: false };
+      return { sentOverNetwork: false, error: 'WhatsApp no está conectado.' };
     }
     try {
       const buffer = fs.readFileSync(media.tempFilePath);
+      let sent;
       if (media.kind === 'image') {
-        await this.sock.sendMessage(jid, { image: buffer, caption: media.caption });
+        sent = await this.sock.sendMessage(jid, { image: buffer, caption: media.caption });
       } else if (media.kind === 'video') {
-        await this.sock.sendMessage(jid, { video: buffer, caption: media.caption });
+        sent = await this.sock.sendMessage(jid, { video: buffer, caption: media.caption });
       } else if (media.kind === 'audio') {
-        await this.sock.sendMessage(jid, {
+        sent = await this.sock.sendMessage(jid, {
           audio: buffer,
           ptt: media.ptt,
-          mimetype: media.mimeType || 'audio/mp4',
+          mimetype: media.mimeType || 'audio/ogg; codecs=opus',
         });
       } else {
-        await this.sock.sendMessage(jid, {
+        sent = await this.sock.sendMessage(jid, {
           document: buffer,
           mimetype: media.mimeType || 'application/octet-stream',
           ...(media.fileName ? { fileName: media.fileName } : {}),
           caption: media.caption,
         });
       }
+      const key = sent?.key?.id
+        ? {
+            remoteJid: jid,
+            id: sent.key.id,
+            fromMe: true,
+          }
+        : undefined;
+      return { sentOverNetwork: true, whatsappMessageId: sent?.key?.id ?? undefined, whatsappKey: key };
+    } catch (err) {
+      return {
+        sentOverNetwork: false,
+        error: err instanceof Error ? err.message : 'Error al enviar archivo multimedia a WhatsApp',
+      };
+    }
+  }
+
+  async sendReactionMessage(
+    jid: string,
+    key: WhatsAppMessageKeyRef,
+    emoji: string,
+  ): Promise<{ sentOverNetwork: boolean; error?: string }> {
+    if (!this.sock || this.store.getWhatsAppState().status !== 'connected') {
+      return { sentOverNetwork: false, error: 'WhatsApp no está conectado.' };
+    }
+    try {
+      await this.sock.sendMessage(jid, {
+        react: {
+          text: emoji,
+          key: {
+            remoteJid: key.remoteJid,
+            id: key.id,
+            fromMe: Boolean(key.fromMe),
+            ...(key.participant ? { participant: key.participant } : {}),
+          },
+        },
+      });
       return { sentOverNetwork: true };
-    } catch {
-      return { sentOverNetwork: false };
+    } catch (err) {
+      return {
+        sentOverNetwork: false,
+        error: err instanceof Error ? err.message : 'Error al enviar reacción a WhatsApp',
+      };
     }
   }
 

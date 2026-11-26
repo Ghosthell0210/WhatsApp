@@ -215,6 +215,24 @@ export function RulesAndLogView({ rules, auditLog, onUpdateRules }: RulesAndLogV
             />
           </div>
 
+          <div className="py-3.5 flex items-center justify-between gap-4">
+            <div>
+              <label htmlFor="rule-reactions" className="text-sm font-medium text-slate-900 block">
+                Reacciones en vivo (❤️ x3)
+              </label>
+              <p className="text-xs text-slate-500">
+                Actualiza el mensaje original en Telegram cuando alguien reacciona en WhatsApp. También controlable con /reacciones off.
+              </p>
+            </div>
+            <input
+              id="rule-reactions"
+              type="checkbox"
+              checked={rules.reactionsEnabled}
+              onChange={(e) => void handleToggle('reactionsEnabled', e.target.checked)}
+              className="w-5 h-5 accent-teal-700 rounded cursor-pointer shrink-0"
+            />
+          </div>
+
           <div className="py-3.5 space-y-3">
             <div className="flex items-center justify-between gap-4">
               <div>

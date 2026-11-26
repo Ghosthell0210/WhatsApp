@@ -25,6 +25,7 @@ export default function App() {
     sendReply,
     sendPipelineTest,
     markAsRead,
+    toggleArchive,
     clearSamples,
   } = useBridgeSocket();
 
@@ -104,10 +105,12 @@ export default function App() {
           {activeTab === 'inbox' && (
             <InboxView
               conversations={state?.conversations ?? []}
+              contacts={state?.contacts ?? []}
               stats={fallbackStats}
               whatsapp={fallbackWa}
               loading={loading}
               onSelectConversation={(jid) => void markAsRead(jid)}
+              onToggleArchive={toggleArchive}
               onSendReply={sendReply}
               onClearSamples={clearSamples}
               onOpenTestModal={() => setTestModalOpen(true)}

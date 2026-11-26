@@ -1,4 +1,4 @@
-import type { MediaKind, RoutingRules } from './types';
+import type { MediaKind, MessageReaction, RoutingRules } from './types';
 
 export const MAX_MEDIA_BYTES = 50 * 1024 * 1024; // 50 MB Telegram Bot API upload limit
 export const TELEGRAM_PHOTO_MAX_BYTES = 10 * 1024 * 1024; // 10 MB Telegram sendPhoto limit
@@ -409,6 +409,136 @@ export function formatPairingCode(rawCode: string): string {
   return clean;
 }
 
+export function escapeHtml(text: string): string {
+  return text
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;');
+}
+
+export function getMediaBadge(mediaType: MediaKind): string {
+  switch (mediaType) {
+    case 'image':
+      return '📷 Foto';
+    case 'video':
+      return '🎥 Video';
+    case 'audio':
+      return '🎤 Audio';
+    case 'document':
+      return '📄 Documento';
+    case 'sticker':
+      return '🎭 Sticker';
+    case 'location':
+      return '📍 Ubicación';
+    case 'contact':
+      return '👤 Contacto';
+    case 'reaction':
+      return '✨ Reacción';
+    default:
+      return '💬 Mensaje';
+  }
+}
+
+export function formatReactionsSummary(reactions?: MessageReaction[]): string {
+  if (!reactions || reactions.length === 0) return '';
+  return reactions
+    .filter((r) => r.count > 0 && r.emoji)
+    .map((r) => (r.count > 1 ? `${r.emoji} x${r.count}` : r.emoji))
+    .join(' · ');
+}
+
+export function formatTelegramMessageHtml(params: {
+  senderName: string;
+  phoneDisplay: string;
+  text: string;
+  mediaType: MediaKind;
+  includePhoneHeader: boolean;
+  hasProfileName?: boolean;
+  hasCustomAlias?: boolean;
+  tags?: string[];
+  reactions?: MessageReaction[];
+  lastReactionNotice?: string;
+}): string {
+  const badge = getMediaBadge(params.mediaType);
+  const safeName = escapeHtml(params.senderName.trim() || params.phoneDisplay);
+  const safePhone = escapeHtml(params.phoneDisplay);
+  const showPhoneLine = params.includePhoneHeader && params.senderName.trim() !== params.phoneDisplay;
+
+  const lines: string[] = [`<b>${badge} · ${safeName}</b>`];
+  if (showPhoneLine) {
+    lines.push(`<code>${safePhone}</code>`);
+  }
+  if (params.tags && params.tags.length > 0) {
+    const cleanTags = params.tags.filter((t) => t !== 'Ejemplo' && t !== 'Cliente');
+    if (cleanTags.length > 0) {
+      lines.push(`<i>🏷️ ${escapeHtml(cleanTags.join(' · '))}</i>`);
+    }
+  }
+  if (params.hasProfileName === false && !params.hasCustomAlias) {
+    lines.push('<i>⚠️ Sin nombre de perfil · Responde con /nuevo &lt;nombre&gt;</i>');
+  }
+
+  lines.push('');
+  lines.push(escapeHtml(params.text));
+
+  const rxText = formatReactionsSummary(params.reactions);
+  if (rxText || params.lastReactionNotice) {
+    lines.push('');
+    const parts: string[] = [];
+    if (rxText) parts.push(`<b>Reacciones:</b> ${escapeHtml(rxText)}`);
+    if (params.lastReactionNotice) parts.push(`<i>(${escapeHtml(params.lastReactionNotice)})</i>`);
+    lines.push(parts.join(' '));
+  }
+
+  return lines.join('\n');
+}
+
+export function formatTelegramCaptionHtml(params: {
+  senderName: string;
+  phoneDisplay: string;
+  caption?: string;
+  mediaType: MediaKind;
+  includePhoneHeader: boolean;
+  hasProfileName?: boolean;
+  hasCustomAlias?: boolean;
+  reactions?: MessageReaction[];
+  lastReactionNotice?: string;
+}): string {
+  const full = formatTelegramMessageHtml({
+    senderName: params.senderName,
+    phoneDisplay: params.phoneDisplay,
+    text: params.caption?.trim() || '',
+    mediaType: params.mediaType,
+    includePhoneHeader: params.includePhoneHeader,
+    hasProfileName: params.hasProfileName,
+    hasCustomAlias: params.hasCustomAlias,
+    reactions: params.reactions,
+    lastReactionNotice: params.lastReactionNotice,
+  }).trim();
+  return full.length <= 1024 ? full : `${full.slice(0, 1020)}…`;
+}
+
+export interface WhatsAppReactionInfo {
+  targetMessageId: string;
+  emoji: string; // empty string means reaction removed
+  fromMe?: boolean;
+}
+
+export function extractWhatsAppReaction(
+  message: Record<string, unknown> | null | undefined,
+): WhatsAppReactionInfo | null {
+  if (!message || typeof message !== 'object') return null;
+  const rx = message.reactionMessage as
+    | { key?: { id?: string; fromMe?: boolean }; text?: string }
+    | undefined;
+  if (!rx || !rx.key?.id) return null;
+  return {
+    targetMessageId: rx.key.id,
+    emoji: typeof rx.text === 'string' ? rx.text.trim() : '',
+    fromMe: rx.key.fromMe,
+  };
+}
+
 export interface ParsedVcfContact {
   fullName: string;
   phone: string;
@@ -417,29 +547,49 @@ export interface ParsedVcfContact {
 
 export function parseVcfContacts(vcfText: string): ParsedVcfContact[] {
   const results: ParsedVcfContact[] = [];
-  const cards = vcfText.split(/END:\s*VCARD/i);
+  const unfolded = vcfText.replace(/\r?\n[ \t]/g, '');
+  const cards = unfolded.split(/END:\s*VCARD/i);
   for (const card of cards) {
     let fullName = '';
-    let rawPhone = '';
+    let fallbackN = '';
+    const phones: string[] = [];
     const lines = card.split(/\r?\n/);
     for (const line of lines) {
-      if (line.toUpperCase().startsWith('FN:')) {
-        fullName = line.slice(3).trim();
-      } else if (line.toUpperCase().includes('TEL')) {
-        const parts = line.split(':');
-        if (parts[1]) {
-          rawPhone = parts[1].trim();
+      const upper = line.toUpperCase();
+      if (/^FN(;[^:]*)?:/i.test(line)) {
+        const idx = line.indexOf(':');
+        if (idx !== -1) fullName = line.slice(idx + 1).trim();
+      } else if (/^N(;[^:]*)?:/i.test(line) && !fallbackN) {
+        const idx = line.indexOf(':');
+        if (idx !== -1) {
+          fallbackN = line
+            .slice(idx + 1)
+            .split(';')
+            .map((s) => s.trim())
+            .filter(Boolean)
+            .reverse()
+            .join(' ');
+        }
+      } else if (upper.includes('TEL')) {
+        const idx = line.indexOf(':');
+        if (idx !== -1) {
+          const val = line.slice(idx + 1).trim();
+          if (val) phones.push(val);
         }
       }
     }
-    const cleanDigits = sanitizePairingPhoneNumber(rawPhone);
-    if (cleanDigits) {
-      const jid = `${cleanDigits}@s.whatsapp.net`;
-      results.push({
-        fullName: fullName || `+${cleanDigits}`,
-        phone: `+${cleanDigits}`,
-        jid,
-      });
+    const chosenName = fullName || fallbackN;
+    for (const rawPhone of phones) {
+      const cleanDigits = sanitizePairingPhoneNumber(rawPhone);
+      if (cleanDigits) {
+        const jid = `${cleanDigits}@s.whatsapp.net`;
+        results.push({
+          fullName: chosenName || `+${cleanDigits}`,
+          phone: `+${cleanDigits}`,
+          jid,
+        });
+        break;
+      }
     }
   }
   return results;

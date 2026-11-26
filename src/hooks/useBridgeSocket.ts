@@ -85,6 +85,22 @@ export function useBridgeSocket() {
                 stats: event.payload.stats,
               };
             }
+            if (event.type === 'message:updated' || event.type === 'conversation:updated') {
+              const updatedConv =
+                event.type === 'message:updated' ? event.payload.conversation : event.payload;
+              return {
+                ...prev,
+                conversations: prev.conversations.map((c) =>
+                  c.jid === updatedConv.jid ? updatedConv : c,
+                ),
+              };
+            }
+            if (event.type === 'contacts:updated') {
+              return {
+                ...prev,
+                contacts: event.payload,
+              };
+            }
             if (event.type === 'log:new') {
               const exists = prev.auditLog.some((l) => l.id === event.payload.entry.id);
               const nextLog = exists
@@ -222,6 +238,13 @@ export function useBridgeSocket() {
     await fetch(`/api/conversations/${encodeURIComponent(jid)}/read`, { method: 'POST' });
   }, []);
 
+  const toggleArchive = useCallback(async (jid: string) => {
+    const res = await fetch(`/api/conversations/${encodeURIComponent(jid)}/archive`, {
+      method: 'POST',
+    });
+    return res.json();
+  }, []);
+
   const clearSamples = useCallback(async () => {
     const res = await fetch('/api/conversations/clear-samples', { method: 'POST' });
     const data = await res.json();
@@ -244,6 +267,7 @@ export function useBridgeSocket() {
     sendReply,
     sendPipelineTest,
     markAsRead,
+    toggleArchive,
     clearSamples,
   };
 }

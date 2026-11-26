@@ -12,6 +12,7 @@ import type {
   MessageDirection,
   RoutingRules,
   TelegramPublicState,
+  WhatsAppMessageKeyRef,
   WhatsAppPublicState,
 } from './types';
 import { formatPhoneDisplay, parseVcfContacts } from './logic';
@@ -411,18 +412,26 @@ export class BridgeStore {
     };
   }
 
-  resolveContactName(jid: string): { displayName: string; phoneDisplay: string; hasProfileName: boolean } {
+  resolveContactName(jid: string): {
+    displayName: string;
+    phoneDisplay: string;
+    hasProfileName: boolean;
+    hasCustomAlias: boolean;
+    tags: string[];
+  } {
     const phoneDisplay = formatPhoneDisplay(jid);
     const contact = this.data.contacts.find((c) => c.jid === jid);
     const conv = this.data.conversations.find((c) => c.jid === jid);
 
     const customAlias = contact?.customAlias?.trim();
-    const profileName = contact?.profileName?.trim() || conv?.name?.trim();
+    const profileName = contact?.profileName?.trim() || (conv?.name && conv.name !== phoneDisplay ? conv.name.trim() : '');
 
     const hasProfileName = Boolean(profileName && profileName !== phoneDisplay);
-    const displayName = customAlias || (hasProfileName ? profileName! : phoneDisplay);
+    const hasCustomAlias = Boolean(customAlias);
+    const displayName = customAlias || (hasProfileName ? profileName : phoneDisplay);
+    const tags = contact?.tags ?? [];
 
-    return { displayName, phoneDisplay, hasProfileName };
+    return { displayName, phoneDisplay, hasProfileName, hasCustomAlias, tags };
   }
 
   upsertContact(params: {
@@ -435,21 +444,25 @@ export class BridgeStore {
     const phone = params.phone || formatPhoneDisplay(params.jid);
     let contact = this.data.contacts.find((c) => c.jid === params.jid);
     const now = Date.now();
+    const validProfileName =
+      params.profileName && params.profileName.trim() && params.profileName.trim() !== phone
+        ? params.profileName.trim()
+        : undefined;
 
     if (!contact) {
       contact = {
         jid: params.jid,
         phone,
-        profileName: params.profileName,
-        tags: params.tags ?? ['Cliente'],
+        profileName: validProfileName,
+        tags: params.tags ?? [],
         isImported: Boolean(params.isImported),
         lastSeenAt: now,
-        noProfileNameWarn: !params.profileName || params.profileName === phone,
+        noProfileNameWarn: !validProfileName,
       };
       this.data.contacts.push(contact);
     } else {
-      if (params.profileName && params.profileName !== formatPhoneDisplay(params.jid)) {
-        contact.profileName = params.profileName;
+      if (validProfileName) {
+        contact.profileName = validProfileName;
         contact.noProfileNameWarn = false;
       }
       if (params.tags) {
@@ -460,6 +473,13 @@ export class BridgeStore {
       }
       contact.lastSeenAt = now;
     }
+
+    const conv = this.data.conversations.find((c) => c.jid === params.jid);
+    if (conv) {
+      const resolved = this.resolveContactName(params.jid);
+      conv.name = resolved.displayName;
+    }
+
     this.schedulePersist();
     return contact;
   }
@@ -473,7 +493,7 @@ export class BridgeStore {
         phone: item.phone,
         profileName: item.fullName,
         isImported: true,
-        tags: ['VCF Import'],
+        tags: ['VCF'],
       });
       count++;
     }
@@ -481,10 +501,20 @@ export class BridgeStore {
     return count;
   }
 
-  setContactAlias(jid: string, alias: string): BridgeContact | null {
-    const contact = this.data.contacts.find((c) => c.jid === jid);
-    if (!contact) return null;
-    contact.customAlias = alias.trim() || undefined;
+  setContactAlias(jid: string, alias: string, tags?: string[]): BridgeContact {
+    const cleanAlias = alias.trim();
+    let contact = this.data.contacts.find((c) => c.jid === jid);
+    if (!contact) {
+      contact = this.upsertContact({ jid });
+    }
+    contact.customAlias = cleanAlias || undefined;
+    if (tags && tags.length > 0) {
+      contact.tags = [...new Set([...contact.tags, ...tags])];
+    }
+    const conv = this.data.conversations.find((c) => c.jid === jid);
+    if (conv) {
+      conv.name = this.resolveContactName(jid).displayName;
+    }
     this.schedulePersist();
     return contact;
   }
@@ -493,6 +523,10 @@ export class BridgeStore {
     const idx = this.data.contacts.findIndex((c) => c.jid === jid);
     if (idx === -1) return false;
     this.data.contacts.splice(idx, 1);
+    const conv = this.data.conversations.find((c) => c.jid === jid);
+    if (conv) {
+      conv.name = this.resolveContactName(jid).displayName;
+    }
     this.schedulePersist();
     return true;
   }
@@ -505,6 +539,83 @@ export class BridgeStore {
     return { ...conv, messages: [...conv.messages] };
   }
 
+  setPinnedTelegramMessageId(jid: string, telegramMessageId: number): BridgeConversation | null {
+    const conv = this.data.conversations.find((c) => c.jid === jid);
+    if (!conv) return null;
+    conv.pinnedTelegramMessageId = telegramMessageId;
+    this.schedulePersist();
+    return { ...conv, messages: [...conv.messages] };
+  }
+
+  getConversation(jid: string): BridgeConversation | null {
+    const conv = this.data.conversations.find((c) => c.jid === jid);
+    return conv ? { ...conv, messages: [...conv.messages] } : null;
+  }
+
+  searchConversationsAndContacts(query: string): Array<{
+    jid: string;
+    displayName: string;
+    phoneDisplay: string;
+    unreadCount: number;
+    archived: boolean;
+    lastMessageText: string;
+    lastMessageAt: number;
+  }> {
+    const q = query.trim().toLowerCase();
+    const map = new Map<
+      string,
+      {
+        jid: string;
+        displayName: string;
+        phoneDisplay: string;
+        unreadCount: number;
+        archived: boolean;
+        lastMessageText: string;
+        lastMessageAt: number;
+      }
+    >();
+
+    for (const conv of this.data.conversations) {
+      const resolved = this.resolveContactName(conv.jid);
+      map.set(conv.jid, {
+        jid: conv.jid,
+        displayName: resolved.displayName,
+        phoneDisplay: resolved.phoneDisplay,
+        unreadCount: conv.unreadCount,
+        archived: Boolean(conv.archived),
+        lastMessageText: conv.lastMessageText,
+        lastMessageAt: conv.lastMessageAt,
+      });
+    }
+
+    for (const contact of this.data.contacts) {
+      if (!map.has(contact.jid)) {
+        const resolved = this.resolveContactName(contact.jid);
+        map.set(contact.jid, {
+          jid: contact.jid,
+          displayName: resolved.displayName,
+          phoneDisplay: resolved.phoneDisplay,
+          unreadCount: 0,
+          archived: false,
+          lastMessageText: contact.tags.length > 0 ? `Etiquetas: ${contact.tags.join(', ')}` : 'Sin mensajes aún',
+          lastMessageAt: contact.lastSeenAt,
+        });
+      }
+    }
+
+    const items = [...map.values()];
+    const filtered = q
+      ? items.filter(
+          (item) =>
+            item.displayName.toLowerCase().includes(q) ||
+            item.phoneDisplay.toLowerCase().includes(q) ||
+            item.jid.toLowerCase().includes(q),
+        )
+      : items;
+
+    return filtered.sort((a, b) => b.lastMessageAt - a.lastMessageAt);
+  }
+
   recordMessage(params: {
     jid: string;
     senderName: string;
@@ -513,10 +624,13 @@ export class BridgeStore {
     mediaType?: MediaKind;
     telegramMessageId?: number;
     extraTelegramMessageIds?: number[];
+    whatsappMessageId?: string;
+    whatsappKey?: WhatsAppMessageKeyRef;
     deliveryStatus: BridgeMessage['deliveryStatus'];
     isSample?: boolean;
   }): { conversation: BridgeConversation; message: BridgeMessage; stats: BridgeStats } {
-    const phoneDisplay = formatPhoneDisplay(params.jid);
+    const resolved = this.resolveContactName(params.jid);
+    const phoneDisplay = resolved.phoneDisplay;
     const now = Date.now();
     const message: BridgeMessage = {
       id: crypto.randomUUID(),
@@ -528,6 +642,8 @@ export class BridgeStore {
       mediaType: params.mediaType ?? 'text',
       timestamp: now,
       telegramMessageId: params.telegramMessageId,
+      whatsappMessageId: params.whatsappMessageId,
+      whatsappKey: params.whatsappKey,
       isSample: params.isSample,
       deliveryStatus: params.deliveryStatus,
     };
@@ -536,7 +652,7 @@ export class BridgeStore {
     if (!conv) {
       conv = {
         jid: params.jid,
-        name: params.direction === 'inbound_wa' ? params.senderName : phoneDisplay,
+        name: resolved.displayName,
         phoneDisplay,
         lastMessageText: params.text,
         lastMessageAt: now,
@@ -548,14 +664,15 @@ export class BridgeStore {
       };
       this.data.conversations.unshift(conv);
     } else {
-      if (params.direction === 'inbound_wa' && params.senderName && params.senderName !== phoneDisplay) {
-        conv.name = params.senderName;
-      }
+      conv.name = resolved.displayName;
       conv.lastMessageText = params.text;
       conv.lastMessageAt = now;
       conv.lastDirection = params.direction;
       if (params.direction === 'inbound_wa') {
         conv.unreadCount += 1;
+        if (conv.archived) {
+          conv.archived = false;
+        }
       } else {
         conv.unreadCount = 0;
       }
@@ -597,6 +714,89 @@ export class BridgeStore {
       message,
       stats: this.getStats(),
     };
+  }
+
+  applyReaction(params: {
+    targetWhatsappMessageId?: string;
+    targetTelegramMessageId?: number;
+    senderId: string;
+    emoji: string;
+  }): {
+    conversation: BridgeConversation;
+    message: BridgeMessage;
+    action: 'added' | 'removed';
+    emoji: string;
+  } | null {
+    let targetConv: BridgeConversation | undefined;
+    let targetMsg: BridgeMessage | undefined;
+
+    for (const conv of this.data.conversations) {
+      const found = conv.messages.find(
+        (m) =>
+          (params.targetWhatsappMessageId && m.whatsappMessageId === params.targetWhatsappMessageId) ||
+          (params.targetTelegramMessageId && m.telegramMessageId === params.targetTelegramMessageId),
+      );
+      if (found) {
+        targetConv = conv;
+        targetMsg = found;
+        break;
+      }
+    }
+
+    if (!targetConv || !targetMsg) return null;
+
+    const reactions = [...(targetMsg.reactions ?? [])];
+    let removedEmoji = '';
+
+    // Remove sender's previous reaction if any
+    for (let i = reactions.length - 1; i >= 0; i--) {
+      const rx = reactions[i];
+      if (rx.senders.includes(params.senderId)) {
+        removedEmoji = rx.emoji;
+        rx.senders = rx.senders.filter((s) => s !== params.senderId);
+        rx.count = rx.senders.length;
+        if (rx.count <= 0) {
+          reactions.splice(i, 1);
+        }
+      }
+    }
+
+    const cleanEmoji = params.emoji.trim();
+    if (cleanEmoji) {
+      const existing = reactions.find((r) => r.emoji === cleanEmoji);
+      if (existing) {
+        existing.senders.push(params.senderId);
+        existing.count = existing.senders.length;
+      } else {
+        reactions.push({
+          emoji: cleanEmoji,
+          count: 1,
+          senders: [params.senderId],
+        });
+      }
+    }
+
+    targetMsg.reactions = reactions;
+    this.schedulePersist();
+    return {
+      conversation: { ...targetConv, messages: [...targetConv.messages] },
+      message: { ...targetMsg, reactions: reactions.map((r) => ({ ...r, senders: [...r.senders] })) },
+      action: cleanEmoji ? 'added' : 'removed',
+      emoji: cleanEmoji || removedEmoji,
+    };
+  }
+
+  lookupMessageByTelegramMessageId(tgMessageId: number): {
+    conversation: BridgeConversation;
+    message: BridgeMessage;
+  } | null {
+    for (const conv of this.data.conversations) {
+      const msg = conv.messages.find((m) => m.telegramMessageId === tgMessageId);
+      if (msg) {
+        return { conversation: { ...conv, messages: [...conv.messages] }, message: msg };
+      }
+    }
+    return null;
   }
 
   appendAuditLog(entry: Omit<AuditLogEntry, 'id' | 'timestamp'>): { entry: AuditLogEntry; stats: BridgeStats } {
