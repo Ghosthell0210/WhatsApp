@@ -409,3 +409,39 @@ export function formatPairingCode(rawCode: string): string {
   return clean;
 }
 
+export interface ParsedVcfContact {
+  fullName: string;
+  phone: string;
+  jid: string;
+}
+
+export function parseVcfContacts(vcfText: string): ParsedVcfContact[] {
+  const results: ParsedVcfContact[] = [];
+  const cards = vcfText.split(/END:\s*VCARD/i);
+  for (const card of cards) {
+    let fullName = '';
+    let rawPhone = '';
+    const lines = card.split(/\r?\n/);
+    for (const line of lines) {
+      if (line.toUpperCase().startsWith('FN:')) {
+        fullName = line.slice(3).trim();
+      } else if (line.toUpperCase().includes('TEL')) {
+        const parts = line.split(':');
+        if (parts[1]) {
+          rawPhone = parts[1].trim();
+        }
+      }
+    }
+    const cleanDigits = sanitizePairingPhoneNumber(rawPhone);
+    if (cleanDigits) {
+      const jid = `${cleanDigits}@s.whatsapp.net`;
+      results.push({
+        fullName: fullName || `+${cleanDigits}`,
+        phone: `+${cleanDigits}`,
+        jid,
+      });
+    }
+  }
+  return results;
+}
+

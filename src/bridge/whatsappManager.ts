@@ -519,6 +519,36 @@ export class WhatsAppManager {
     return { sentOverNetwork: true };
   }
 
+  async sendMediaMessage(jid: string, media: WhatsAppMediaPayload): Promise<{ sentOverNetwork: boolean }> {
+    if (!this.sock || this.store.getWhatsAppState().status !== 'connected') {
+      return { sentOverNetwork: false };
+    }
+    try {
+      const buffer = fs.readFileSync(media.tempFilePath);
+      if (media.kind === 'image') {
+        await this.sock.sendMessage(jid, { image: buffer, caption: media.caption });
+      } else if (media.kind === 'video') {
+        await this.sock.sendMessage(jid, { video: buffer, caption: media.caption });
+      } else if (media.kind === 'audio') {
+        await this.sock.sendMessage(jid, {
+          audio: buffer,
+          ptt: media.ptt,
+          mimetype: media.mimeType || 'audio/mp4',
+        });
+      } else {
+        await this.sock.sendMessage(jid, {
+          document: buffer,
+          mimetype: media.mimeType || 'application/octet-stream',
+          ...(media.fileName ? { fileName: media.fileName } : {}),
+          caption: media.caption,
+        });
+      }
+      return { sentOverNetwork: true };
+    } catch {
+      return { sentOverNetwork: false };
+    }
+  }
+
   async disconnect(logout: boolean): Promise<WhatsAppPublicState> {
     this.manualDisconnect = true;
     this.isConnecting = false;

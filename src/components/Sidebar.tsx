@@ -1,7 +1,7 @@
-import { Inbox, Link2, ShieldCheck, MessageSquare, Send } from 'lucide-react';
+import { Inbox, Link2, ShieldCheck, Users, MessageSquare, Send } from 'lucide-react';
 import type { TelegramPublicState, WhatsAppPublicState } from '../bridge/types';
 
-export type ActiveTab = 'inbox' | 'connections' | 'rules';
+export type ActiveTab = 'inbox' | 'contacts' | 'connections' | 'rules';
 
 interface SidebarProps {
   activeTab: ActiveTab;
@@ -60,6 +60,7 @@ export function Sidebar({
     count?: number;
   }> = [
     { id: 'inbox', label: 'Bandeja PV', icon: Inbox, count: unreadTotal },
+    { id: 'contacts', label: 'Contactos', icon: Users },
     { id: 'connections', label: 'Conexiones', icon: Link2 },
     { id: 'rules', label: 'Reglas y Registro', icon: ShieldCheck },
   ];

@@ -34,6 +34,7 @@ function createMockAdapter(overrides?: {
     autoAckMessage: '',
     paused: false,
     blockedJids: [],
+    reactionsEnabled: true,
   };
 
   const adapter: ConsoleBridgeAdapter = {
@@ -49,6 +50,7 @@ function createMockAdapter(overrides?: {
       telegram: tgState,
       rules,
       conversations: [],
+      contacts: [],
       auditLog: [],
       stats: {
         totalForwardedToTg: 0,

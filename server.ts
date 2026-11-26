@@ -159,6 +159,47 @@ async function startServer() {
     res.json({ ok: true, conversation: updated });
   });
 
+  app.post('/api/conversations/:jid/archive', (req, res) => {
+    const jid = decodeURIComponent(req.params.jid || '');
+    const updated = coordinator.store.toggleArchive(jid);
+    if (!updated) {
+      res.status(404).json({ ok: false, message: 'Conversación no encontrada.' });
+      return;
+    }
+    res.json({ ok: true, conversation: updated });
+  });
+
+  app.post('/api/contacts/import-vcf', (req, res) => {
+    const vcfText = typeof req.body?.vcfText === 'string' ? req.body.vcfText : '';
+    if (!vcfText.trim()) {
+      res.status(400).json({ ok: false, message: 'Contenido VCF vacío.' });
+      return;
+    }
+    const count = coordinator.store.importVcf(vcfText);
+    res.json({ ok: true, importedCount: count, state: coordinator.getPublicState() });
+  });
+
+  app.patch('/api/contacts/:jid/alias', (req, res) => {
+    const jid = decodeURIComponent(req.params.jid || '');
+    const alias = typeof req.body?.alias === 'string' ? req.body.alias : '';
+    const updated = coordinator.store.setContactAlias(jid, alias);
+    if (!updated) {
+      res.status(404).json({ ok: false, message: 'Contacto no encontrado.' });
+      return;
+    }
+    res.json({ ok: true, contact: updated, state: coordinator.getPublicState() });
+  });
+
+  app.delete('/api/contacts/:jid', (req, res) => {
+    const jid = decodeURIComponent(req.params.jid || '');
+    const removed = coordinator.store.forgetContact(jid);
+    if (!removed) {
+      res.status(404).json({ ok: false, message: 'Contacto no encontrado.' });
+      return;
+    }
+    res.json({ ok: true, state: coordinator.getPublicState() });
+  });
+
   app.post('/api/messages/reply', async (req, res) => {
     const rawJid = typeof req.body?.jid === 'string' ? req.body.jid.trim() : '';
     const text = typeof req.body?.text === 'string' ? req.body.text.trim() : '';

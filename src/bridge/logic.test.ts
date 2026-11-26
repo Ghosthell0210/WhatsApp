@@ -29,6 +29,7 @@ const defaultRules: RoutingRules = {
   autoAckMessage: '',
   paused: false,
   blockedJids: [],
+  reactionsEnabled: true,
 };
 
 test('isPrivateWhatsAppJid allows private DMs and blocks groups/broadcasts/blocked contacts when enabled', () => {

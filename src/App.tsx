@@ -2,6 +2,7 @@ import { useMemo, useState } from 'react';
 import { Sidebar, type ActiveTab } from './components/Sidebar';
 import { TopBar } from './components/TopBar';
 import { InboxView } from './components/InboxView';
+import { ContactsView } from './components/ContactsView';
 import { ConnectionsView } from './components/ConnectionsView';
 import { RulesAndLogView } from './components/RulesAndLogView';
 import { PipelineTestModal } from './components/PipelineTestModal';
@@ -66,6 +67,7 @@ export default function App() {
     autoAckMessage: 'Recibí tu mensaje, te respondo en breve.',
     paused: false,
     blockedJids: [],
+    reactionsEnabled: true,
   };
 
   return (
@@ -110,6 +112,10 @@ export default function App() {
               onClearSamples={clearSamples}
               onOpenTestModal={() => setTestModalOpen(true)}
             />
+          )}
+
+          {activeTab === 'contacts' && (
+            <ContactsView contacts={state?.contacts ?? []} />
           )}
 
           {activeTab === 'connections' && (

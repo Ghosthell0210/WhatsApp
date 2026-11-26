@@ -13,6 +13,7 @@ interface TopBarProps {
 
 const TAB_TITLES: Record<ActiveTab, string> = {
   inbox: 'Bandeja de mensajes privados',
+  contacts: 'Libreta de contactos',
   connections: 'Conexión WhatsApp y Telegram',
   rules: 'Reglas de filtrado y registro',
 };
@@ -107,6 +108,17 @@ export function TopBar({
           }`}
         >
           Bandeja PV{unreadTotal > 0 ? ` (${unreadTotal})` : ''}
+        </button>
+        <button
+          type="button"
+          onClick={() => onSelectTab('contacts')}
+          className={`px-3 py-1.5 text-xs font-medium rounded-md whitespace-nowrap shrink-0 transition-colors ${
+            activeTab === 'contacts'
+              ? 'bg-white text-teal-800 border border-slate-200'
+              : 'text-slate-600 hover:text-slate-900'
+          }`}
+        >
+          Contactos
         </button>
         <button
           type="button"

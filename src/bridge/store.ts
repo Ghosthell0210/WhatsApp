@@ -3,6 +3,7 @@ import path from 'node:path';
 import crypto from 'node:crypto';
 import type {
   AuditLogEntry,
+  BridgeContact,
   BridgeConversation,
   BridgeMessage,
   BridgePublicState,
@@ -13,11 +14,12 @@ import type {
   TelegramPublicState,
   WhatsAppPublicState,
 } from './types';
-import { formatPhoneDisplay } from './logic';
+import { formatPhoneDisplay, parseVcfContacts } from './logic';
 
 interface PersistedBridgeData {
   rules: RoutingRules;
   conversations: BridgeConversation[];
+  contacts: BridgeContact[];
   auditLog: AuditLogEntry[];
   telegramMap: Record<string, string>; // telegramMessageId -> whatsappJid
   telegramChatId: string;
@@ -213,6 +215,15 @@ function buildSeedData(): PersistedBridgeData {
     },
   ];
 
+  const contacts: BridgeContact[] = conversations.map((c) => ({
+    jid: c.jid,
+    phone: c.phoneDisplay,
+    profileName: c.name,
+    tags: ['Cliente', 'Ejemplo'],
+    isImported: true,
+    lastSeenAt: c.lastMessageAt,
+  }));
+
   return {
     rules: {
       onlyPrivateMessages: true,
@@ -222,8 +233,10 @@ function buildSeedData(): PersistedBridgeData {
       autoAckMessage: 'Recibí tu mensaje, te respondo en breve.',
       paused: false,
       blockedJids: [],
+      reactionsEnabled: true,
     },
     conversations,
+    contacts,
     auditLog,
     telegramMap: {
       '1040': '5491155551234@s.whatsapp.net',
@@ -286,7 +299,9 @@ export class BridgeStore {
               autoAckMessage: parsed.rules?.autoAckMessage ?? 'Recibí tu mensaje, te respondo en breve.',
               paused: parsed.rules?.paused ?? false,
               blockedJids: Array.isArray(parsed.rules?.blockedJids) ? parsed.rules.blockedJids : [],
+              reactionsEnabled: parsed.rules?.reactionsEnabled ?? true,
             },
+            contacts: Array.isArray(parsed.contacts) ? parsed.contacts : [],
             telegramMap: parsed.telegramMap ?? {},
             auditLog: Array.isArray(parsed.auditLog) ? parsed.auditLog : [],
           };
@@ -390,9 +405,104 @@ export class BridgeStore {
       telegram: this.getTelegramState(),
       rules: this.getRules(),
       conversations: [...this.data.conversations].sort((a, b) => b.lastMessageAt - a.lastMessageAt),
+      contacts: [...this.data.contacts].sort((a, b) => b.lastSeenAt - a.lastSeenAt),
       auditLog: [...this.data.auditLog].sort((a, b) => b.timestamp - a.timestamp).slice(0, 100),
       stats: this.getStats(),
     };
+  }
+
+  resolveContactName(jid: string): { displayName: string; phoneDisplay: string; hasProfileName: boolean } {
+    const phoneDisplay = formatPhoneDisplay(jid);
+    const contact = this.data.contacts.find((c) => c.jid === jid);
+    const conv = this.data.conversations.find((c) => c.jid === jid);
+
+    const customAlias = contact?.customAlias?.trim();
+    const profileName = contact?.profileName?.trim() || conv?.name?.trim();
+
+    const hasProfileName = Boolean(profileName && profileName !== phoneDisplay);
+    const displayName = customAlias || (hasProfileName ? profileName! : phoneDisplay);
+
+    return { displayName, phoneDisplay, hasProfileName };
+  }
+
+  upsertContact(params: {
+    jid: string;
+    phone?: string;
+    profileName?: string;
+    isImported?: boolean;
+    tags?: string[];
+  }): BridgeContact {
+    const phone = params.phone || formatPhoneDisplay(params.jid);
+    let contact = this.data.contacts.find((c) => c.jid === params.jid);
+    const now = Date.now();
+
+    if (!contact) {
+      contact = {
+        jid: params.jid,
+        phone,
+        profileName: params.profileName,
+        tags: params.tags ?? ['Cliente'],
+        isImported: Boolean(params.isImported),
+        lastSeenAt: now,
+        noProfileNameWarn: !params.profileName || params.profileName === phone,
+      };
+      this.data.contacts.push(contact);
+    } else {
+      if (params.profileName && params.profileName !== formatPhoneDisplay(params.jid)) {
+        contact.profileName = params.profileName;
+        contact.noProfileNameWarn = false;
+      }
+      if (params.tags) {
+        contact.tags = [...new Set([...contact.tags, ...params.tags])];
+      }
+      if (params.isImported) {
+        contact.isImported = true;
+      }
+      contact.lastSeenAt = now;
+    }
+    this.schedulePersist();
+    return contact;
+  }
+
+  importVcf(vcfText: string): number {
+    const parsed = parseVcfContacts(vcfText);
+    let count = 0;
+    for (const item of parsed) {
+      this.upsertContact({
+        jid: item.jid,
+        phone: item.phone,
+        profileName: item.fullName,
+        isImported: true,
+        tags: ['VCF Import'],
+      });
+      count++;
+    }
+    this.schedulePersist();
+    return count;
+  }
+
+  setContactAlias(jid: string, alias: string): BridgeContact | null {
+    const contact = this.data.contacts.find((c) => c.jid === jid);
+    if (!contact) return null;
+    contact.customAlias = alias.trim() || undefined;
+    this.schedulePersist();
+    return contact;
+  }
+
+  forgetContact(jid: string): boolean {
+    const idx = this.data.contacts.findIndex((c) => c.jid === jid);
+    if (idx === -1) return false;
+    this.data.contacts.splice(idx, 1);
+    this.schedulePersist();
+    return true;
+  }
+
+  toggleArchive(jid: string): BridgeConversation | null {
+    const conv = this.data.conversations.find((c) => c.jid === jid);
+    if (!conv) return null;
+    conv.archived = !conv.archived;
+    this.schedulePersist();
+    return { ...conv, messages: [...conv.messages] };
   }
 
   recordMessage(params: {

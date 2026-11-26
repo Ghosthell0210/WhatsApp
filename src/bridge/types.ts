@@ -25,6 +25,23 @@ export type MediaKind =
   | 'contact'
   | 'reaction';
 
+export interface BridgeContact {
+  jid: string;
+  phone: string;
+  profileName?: string;
+  customAlias?: string;
+  tags: string[];
+  isImported: boolean;
+  lastSeenAt: number;
+  noProfileNameWarn?: boolean;
+}
+
+export interface MessageReaction {
+  emoji: string;
+  count: number;
+  senders: string[];
+}
+
 export interface BridgeMessage {
   id: string;
   jid: string;
@@ -38,6 +55,7 @@ export interface BridgeMessage {
   replyToText?: string;
   isSample?: boolean;
   deliveryStatus: 'delivered_tg' | 'sent_wa' | 'simulated' | 'pending' | 'failed';
+  reactions?: MessageReaction[];
 }
 
 export interface BridgeConversation {
@@ -50,6 +68,7 @@ export interface BridgeConversation {
   unreadCount: number;
   lastTelegramMessageId?: number;
   isSample?: boolean;
+  archived?: boolean;
   messages: BridgeMessage[];
 }
 
@@ -61,6 +80,7 @@ export interface RoutingRules {
   autoAckMessage: string;
   paused: boolean;
   blockedJids: string[];
+  reactionsEnabled: boolean;
 }
 
 export interface WhatsAppMediaPayload {
@@ -123,6 +143,7 @@ export interface BridgePublicState {
   telegram: TelegramPublicState;
   rules: RoutingRules;
   conversations: BridgeConversation[];
+  contacts: BridgeContact[];
   auditLog: AuditLogEntry[];
   stats: BridgeStats;
 }
