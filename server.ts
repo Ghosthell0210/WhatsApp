@@ -1,4 +1,5 @@
 import 'dotenv/config';
+import { execSync } from 'node:child_process';
 import express from 'express';
 import fs from 'node:fs';
 import http from 'node:http';
@@ -267,14 +268,24 @@ async function startServer() {
 
   // Frontend middleware / static serving
   const distDir = path.resolve(process.cwd(), 'dist');
-  const hasDistBuild = fs.existsSync(path.join(distDir, 'index.html'));
+  let hasDistBuild = fs.existsSync(path.join(distDir, 'index.html'));
+  if (!hasDistBuild) {
+    try {
+      console.log('[Puente WA-TG] Compilando interfaz web (vite build) en primer inicio...');
+      execSync('npx vite build', { stdio: 'inherit' });
+      hasDistBuild = fs.existsSync(path.join(distDir, 'index.html'));
+    } catch (err) {
+      console.warn('[Puente WA-TG] Aviso: no se pudo compilar vite build automáticamente:', err);
+    }
+  }
+
   const isProd = process.env.NODE_ENV === 'production';
   const isConsoleOnly =
     process.argv.includes('--console') ||
     process.env.HEADLESS === 'true' ||
     Boolean(process.env.P_SERVER_UUID);
 
-  if ((isProd || isConsoleOnly) && hasDistBuild) {
+  if (hasDistBuild) {
     app.use(express.static(distDir));
     app.get('*', (_req, res) => {
       res.sendFile(path.join(distDir, 'index.html'));
@@ -287,10 +298,10 @@ async function startServer() {
     });
     app.use(vite.middlewares);
   } else {
-    app.get('/', (_req, res) => {
+    app.get('*', (_req, res) => {
       res.json({
         ok: true,
-        service: 'Puente WA-TG (Modo consola)',
+        service: 'Puente WA-TG',
         state: coordinator.getPublicState(),
       });
     });
