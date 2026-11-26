@@ -34,6 +34,7 @@ const defaultRules: RoutingRules = {
   paused: false,
   blockedJids: [],
   reactionsEnabled: true,
+  keepAliveEnabled: true,
 };
 
 test('isPrivateWhatsAppJid allows private DMs and blocks groups/broadcasts/blocked contacts when enabled', () => {
@@ -251,5 +252,46 @@ test('extractWhatsAppReaction extracts reaction target id and emoji or removal',
     { targetMessageId: 'MSG123', emoji: '', fromMe: false },
   );
 });
+
+test('CredentialsStore saves, reloads, masks, and clears credentials in a dedicated file', async () => {
+  const fs = await import('node:fs');
+  const os = await import('node:os');
+  const path = await import('node:path');
+  const { CredentialsStore } = await import('./credentials');
+
+  const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'wa-tg-creds-'));
+  const credFile = path.join(tmpDir, 'credenciales.json');
+
+  try {
+    const store1 = new CredentialsStore(credFile);
+    store1.save({
+      telegramBotToken: '7123456789:AAH_secret_value_12345',
+      telegramChatId: '518294012',
+      whatsappPairingPhone: '5491155551234',
+      keepAliveUrl: 'https://mi-bot.example.com/health',
+      keepAliveIntervalSec: 30,
+    });
+
+    assert.equal(fs.existsSync(credFile), true);
+    const store2 = new CredentialsStore(credFile);
+    const loaded = store2.get();
+    assert.equal(loaded.telegramBotToken, '7123456789:AAH_secret_value_12345');
+    assert.equal(loaded.telegramChatId, '518294012');
+    assert.equal(loaded.whatsappPairingPhone, '5491155551234');
+    assert.equal(loaded.keepAliveUrl, 'https://mi-bot.example.com/health');
+    assert.equal(loaded.keepAliveIntervalSec, 30);
+
+    const summary = store2.getSummary();
+    assert.equal(summary.hasTelegramToken, true);
+    assert.equal(summary.telegramTokenMasked, '7123456••••2345');
+
+    store2.clearAll();
+    assert.equal(store2.get().telegramBotToken, '');
+    assert.equal(store2.get().whatsappPairingPhone, '');
+  } finally {
+    fs.rmSync(tmpDir, { recursive: true, force: true });
+  }
+});
+
 
 

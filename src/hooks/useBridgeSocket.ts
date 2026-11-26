@@ -101,6 +101,18 @@ export function useBridgeSocket() {
                 contacts: event.payload,
               };
             }
+            if (event.type === 'keepalive:status') {
+              return {
+                ...prev,
+                keepAlive: event.payload,
+              };
+            }
+            if (event.type === 'credentials:updated') {
+              return {
+                ...prev,
+                credentials: event.payload,
+              };
+            }
             if (event.type === 'log:new') {
               const exists = prev.auditLog.some((l) => l.id === event.payload.entry.id);
               const nextLog = exists
@@ -245,6 +257,25 @@ export function useBridgeSocket() {
     return res.json();
   }, []);
 
+  const pinChat = useCallback(async (jid: string) => {
+    const res = await fetch('/api/telegram/pin', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ jid }),
+    });
+    return res.json();
+  }, []);
+
+  const unpinChat = useCallback(async () => {
+    const res = await fetch('/api/telegram/unpin', { method: 'POST' });
+    return res.json();
+  }, []);
+
+  const clearCredentials = useCallback(async () => {
+    const res = await fetch('/api/credentials', { method: 'DELETE' });
+    return res.json();
+  }, []);
+
   const clearSamples = useCallback(async () => {
     const res = await fetch('/api/conversations/clear-samples', { method: 'POST' });
     const data = await res.json();
@@ -268,6 +299,9 @@ export function useBridgeSocket() {
     sendPipelineTest,
     markAsRead,
     toggleArchive,
+    pinChat,
+    unpinChat,
+    clearCredentials,
     clearSamples,
   };
 }

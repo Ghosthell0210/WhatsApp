@@ -1,12 +1,13 @@
 import { useEffect, useState } from 'react';
-import { Eye, EyeOff, KeyRound, LogOut, QrCode, RefreshCw, Send, Smartphone } from 'lucide-react';
+import { Eye, EyeOff, FileKey2, KeyRound, LogOut, QrCode, RefreshCw, Send, Smartphone, Trash2 } from 'lucide-react';
 import { sanitizePairingPhoneNumber, validateTelegramConfigInput } from '../bridge/logic';
-import type { TelegramPublicState, WhatsAppPublicState } from '../bridge/types';
+import type { CredentialsSummary, TelegramPublicState, WhatsAppPublicState } from '../bridge/types';
 import type { TelegramFormErrors } from '../hooks/useBridgeSocket';
 
 interface ConnectionsViewProps {
   whatsapp: WhatsAppPublicState;
   telegram: TelegramPublicState;
+  credentials?: CredentialsSummary;
   onConnectWhatsApp: (pairingPhone?: string) => Promise<{ ok: boolean; message?: string }>;
   onDisconnectWhatsApp: (logout: boolean) => Promise<unknown>;
   onConnectTelegram: (
@@ -15,19 +16,22 @@ interface ConnectionsViewProps {
   ) => Promise<{ ok: boolean; message?: string; errors?: TelegramFormErrors }>;
   onDisconnectTelegram: () => Promise<unknown>;
   onTestTelegram: () => Promise<{ ok: boolean; error?: string }>;
+  onClearCredentials: () => Promise<unknown>;
 }
 
 export function ConnectionsView({
   whatsapp,
   telegram,
+  credentials,
   onConnectWhatsApp,
   onDisconnectWhatsApp,
   onConnectTelegram,
   onDisconnectTelegram,
   onTestTelegram,
+  onClearCredentials,
 }: ConnectionsViewProps) {
   const [waMode, setWaMode] = useState<'code' | 'qr'>('code');
-  const [pairingPhone, setPairingPhone] = useState('');
+  const [pairingPhone, setPairingPhone] = useState(credentials?.whatsappPairingPhone || '');
   const [waPhoneError, setWaPhoneError] = useState<string | null>(null);
   const [token, setToken] = useState('');
   const [chatId, setChatId] = useState(telegram.chatId || '');
@@ -37,12 +41,19 @@ export function ConnectionsView({
   const [fieldErrors, setFieldErrors] = useState<TelegramFormErrors>({});
   const [waBusy, setWaBusy] = useState(false);
   const [testingTg, setTestingTg] = useState(false);
+  const [clearingCreds, setClearingCreds] = useState(false);
 
   useEffect(() => {
     if (telegram.chatId && !chatId) {
       setChatId(telegram.chatId);
     }
   }, [telegram.chatId, chatId]);
+
+  useEffect(() => {
+    if (credentials?.whatsappPairingPhone && !pairingPhone) {
+      setPairingPhone(credentials.whatsappPairingPhone);
+    }
+  }, [credentials?.whatsappPairingPhone, pairingPhone]);
 
   const handleWaConnect = async () => {
     setWaPhoneError(null);
@@ -548,6 +559,61 @@ export function ConnectionsView({
               <span className="font-mono text-xs bg-slate-100 px-1.5 py-0.5 rounded">
                 /responder +54911... Hola!
               </span>
+            </p>
+          </div>
+        </div>
+      </section>
+
+      {/* Persistent Credentials Vault */}
+      <section className="bg-white border border-slate-200 rounded-xl p-6 space-y-4">
+        <div className="flex flex-wrap items-start justify-between gap-4">
+          <div className="flex items-start gap-3">
+            <FileKey2 className="w-5 h-5 text-teal-700 mt-0.5 shrink-0" aria-hidden="true" />
+            <div>
+              <h2 className="font-display text-base font-semibold text-slate-900">
+                Archivo automático de credenciales ({credentials?.filePath || 'credenciales.json'})
+              </h2>
+              <p className="mt-1 text-sm text-slate-600">
+                Tus credenciales se guardan automáticamente en disco (fuera de Git) para reconectar sin volver a pedirlas en cada reinicio.
+              </p>
+            </div>
+          </div>
+
+          <button
+            type="button"
+            disabled={clearingCreds}
+            onClick={async () => {
+              setClearingCreds(true);
+              try {
+                await onClearCredentials();
+              } finally {
+                setClearingCreds(false);
+              }
+            }}
+            className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs font-medium text-rose-700 bg-rose-50 hover:bg-rose-100 disabled:opacity-50 rounded-lg transition-colors whitespace-nowrap"
+          >
+            <Trash2 className="w-3.5 h-3.5" aria-hidden="true" />
+            <span>{clearingCreds ? 'Limpiando...' : 'Limpiar guardadas'}</span>
+          </button>
+        </div>
+
+        <div className="grid grid-cols-1 md:grid-cols-3 gap-4 pt-2 border-t border-slate-100 text-xs">
+          <div>
+            <p className="text-slate-500">Token Bot Telegram</p>
+            <p className="mt-1 font-mono tabular-nums font-medium text-slate-900">
+              {credentials?.hasTelegramToken ? credentials.telegramTokenMasked : 'Sin guardar'}
+            </p>
+          </div>
+          <div>
+            <p className="text-slate-500">Chat ID Telegram</p>
+            <p className="mt-1 font-mono tabular-nums font-medium text-slate-900">
+              {credentials?.hasTelegramChatId ? credentials.telegramChatId : 'Sin guardar'}
+            </p>
+          </div>
+          <div>
+            <p className="text-slate-500">Teléfono WhatsApp guardado</p>
+            <p className="mt-1 font-mono tabular-nums font-medium text-slate-900">
+              {credentials?.whatsappPairingPhone ? `+${credentials.whatsappPairingPhone}` : 'Sin guardar'}
             </p>
           </div>
         </div>

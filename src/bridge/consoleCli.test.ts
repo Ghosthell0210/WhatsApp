@@ -12,6 +12,7 @@ import type { BridgePublicState, RoutingRules, TelegramPublicState } from './typ
 function createMockAdapter(overrides?: {
   telegramConnected?: boolean;
   whatsappConnected?: boolean;
+  hasSavedCreds?: boolean;
 }) {
   const calls: Array<{ fn: string; args: unknown[] }> = [];
   let chatIdListener: ((id: string) => void) | null = null;
@@ -35,6 +36,7 @@ function createMockAdapter(overrides?: {
     paused: false,
     blockedJids: [],
     reactionsEnabled: true,
+    keepAliveEnabled: true,
   };
 
   const adapter: ConsoleBridgeAdapter = {
@@ -58,6 +60,19 @@ function createMockAdapter(overrides?: {
         totalIgnoredNonPv: 0,
         activeConversations: 0,
       },
+      credentials: overrides?.hasSavedCreds
+        ? {
+            filePath: 'credenciales.json',
+            hasTelegramToken: true,
+            telegramTokenMasked: '7123456••••1234',
+            hasTelegramChatId: true,
+            telegramChatId: '518294012',
+            whatsappPairingPhone: '5491155551234',
+            keepAliveUrl: '',
+            keepAliveIntervalSec: 45,
+            updatedAt: Date.now(),
+          }
+        : undefined,
     }),
     connectTelegram: async (token, chatId) => {
       calls.push({ fn: 'connectTelegram', args: [token, chatId] });
@@ -195,6 +210,17 @@ test('startInitialWizardIfNeeded prompts for WhatsApp pairing code when Telegram
 
 test('startInitialWizardIfNeeded skips wizard when both Telegram and WhatsApp are connected', () => {
   const { adapter } = createMockAdapter({ telegramConnected: true, whatsappConnected: true });
+  const controller = new ConsoleSessionController(adapter, () => {});
+  assert.equal(controller.startInitialWizardIfNeeded(), false);
+  assert.equal(controller.getStep(), 'idle');
+});
+
+test('startInitialWizardIfNeeded skips Telegram prompt when saved credenciales.json already has token', () => {
+  const { adapter } = createMockAdapter({
+    telegramConnected: false,
+    whatsappConnected: true,
+    hasSavedCreds: true,
+  });
   const controller = new ConsoleSessionController(adapter, () => {});
   assert.equal(controller.startInitialWizardIfNeeded(), false);
   assert.equal(controller.getStep(), 'idle');

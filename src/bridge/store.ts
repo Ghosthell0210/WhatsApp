@@ -16,6 +16,8 @@ import type {
   WhatsAppPublicState,
 } from './types';
 import { formatPhoneDisplay, parseVcfContacts } from './logic';
+import { CredentialsStore } from './credentials';
+import type { CredentialsSummary, KeepAliveState } from './types';
 
 interface PersistedBridgeData {
   rules: RoutingRules;
@@ -24,6 +26,8 @@ interface PersistedBridgeData {
   auditLog: AuditLogEntry[];
   telegramMap: Record<string, string>; // telegramMessageId -> whatsappJid
   telegramChatId: string;
+  pinnedChatJid?: string | null;
+  pinnedStatusMessageId?: number | null;
   stats: {
     totalForwardedToTg: number;
     totalRepliesToWa: number;
@@ -235,6 +239,8 @@ function buildSeedData(): PersistedBridgeData {
       paused: false,
       blockedJids: [],
       reactionsEnabled: true,
+      keepAliveEnabled: true,
+      keepAliveUrl: '',
     },
     conversations,
     contacts,
@@ -256,6 +262,7 @@ function buildSeedData(): PersistedBridgeData {
 }
 
 export class BridgeStore {
+  public readonly credentials: CredentialsStore;
   private data: PersistedBridgeData;
   private persistTimer: ReturnType<typeof setTimeout> | null = null;
   private dirty = false;
@@ -277,11 +284,36 @@ export class BridgeStore {
     chatId: '',
     lastError: null,
     lastDetectedChatId: null,
+    pinnedChatJid: null,
+    pinnedChatName: null,
+    pinnedStatusMessageId: null,
+  };
+
+  private keepAliveState: KeepAliveState = {
+    enabled: true,
+    intervalSec: 45,
+    lastBeatAt: null,
+    lastHttpPingAt: null,
+    lastHttpPingOk: null,
+    targetUrl: '',
+    reconnectAttemptsWa: 0,
+    reconnectAttemptsTg: 0,
   };
 
   constructor() {
+    this.credentials = new CredentialsStore();
     this.data = this.loadFromDisk();
-    this.tgState.chatId = process.env.TELEGRAM_CHAT_ID?.trim() || this.data.telegramChatId || '';
+    const savedCreds = this.credentials.get();
+    this.tgState.chatId =
+      process.env.TELEGRAM_CHAT_ID?.trim() || savedCreds.telegramChatId || this.data.telegramChatId || '';
+    const pinnedJid = this.data.pinnedChatJid || null;
+    this.tgState.pinnedChatJid = pinnedJid;
+    this.tgState.pinnedChatName = pinnedJid ? this.resolveContactName(pinnedJid).displayName : null;
+    this.tgState.pinnedStatusMessageId = this.data.pinnedStatusMessageId ?? null;
+    this.keepAliveState.enabled = this.data.rules.keepAliveEnabled;
+    this.keepAliveState.intervalSec = savedCreds.keepAliveIntervalSec;
+    this.keepAliveState.targetUrl =
+      this.data.rules.keepAliveUrl || savedCreds.keepAliveUrl || process.env.KEEP_ALIVE_URL?.trim() || '';
   }
 
   private loadFromDisk(): PersistedBridgeData {
@@ -301,10 +333,15 @@ export class BridgeStore {
               paused: parsed.rules?.paused ?? false,
               blockedJids: Array.isArray(parsed.rules?.blockedJids) ? parsed.rules.blockedJids : [],
               reactionsEnabled: parsed.rules?.reactionsEnabled ?? true,
+              keepAliveEnabled: parsed.rules?.keepAliveEnabled ?? true,
+              keepAliveUrl: typeof parsed.rules?.keepAliveUrl === 'string' ? parsed.rules.keepAliveUrl : '',
             },
             contacts: Array.isArray(parsed.contacts) ? parsed.contacts : [],
             telegramMap: parsed.telegramMap ?? {},
             auditLog: Array.isArray(parsed.auditLog) ? parsed.auditLog : [],
+            pinnedChatJid: typeof parsed.pinnedChatJid === 'string' ? parsed.pinnedChatJid : null,
+            pinnedStatusMessageId:
+              typeof parsed.pinnedStatusMessageId === 'number' ? parsed.pinnedStatusMessageId : null,
           };
         }
       }
@@ -393,6 +430,34 @@ export class BridgeStore {
     return this.getTelegramState();
   }
 
+  getKeepAliveState(): KeepAliveState {
+    return { ...this.keepAliveState };
+  }
+
+  setKeepAliveState(next: Partial<KeepAliveState>): KeepAliveState {
+    this.keepAliveState = { ...this.keepAliveState, ...next };
+    return this.getKeepAliveState();
+  }
+
+  getCredentialsSummary(): CredentialsSummary {
+    return this.credentials.getSummary();
+  }
+
+  setPinnedChat(jid: string | null, statusMessageId?: number | null): TelegramPublicState {
+    const cleanJid = jid?.trim() || null;
+    this.data.pinnedChatJid = cleanJid;
+    this.data.pinnedStatusMessageId = cleanJid
+      ? typeof statusMessageId === 'number'
+        ? statusMessageId
+        : null
+      : null;
+    this.tgState.pinnedChatJid = cleanJid;
+    this.tgState.pinnedChatName = cleanJid ? this.resolveContactName(cleanJid).displayName : null;
+    this.tgState.pinnedStatusMessageId = this.data.pinnedStatusMessageId;
+    this.persistToDisk();
+    return this.getTelegramState();
+  }
+
   getStats(): BridgeStats {
     return {
       ...this.data.stats,
@@ -409,6 +474,8 @@ export class BridgeStore {
       contacts: [...this.data.contacts].sort((a, b) => b.lastSeenAt - a.lastSeenAt),
       auditLog: [...this.data.auditLog].sort((a, b) => b.timestamp - a.timestamp).slice(0, 100),
       stats: this.getStats(),
+      credentials: this.getCredentialsSummary(),
+      keepAlive: this.getKeepAliveState(),
     };
   }
 
@@ -515,6 +582,9 @@ export class BridgeStore {
     if (conv) {
       conv.name = this.resolveContactName(jid).displayName;
     }
+    if (this.data.pinnedChatJid === jid) {
+      this.tgState.pinnedChatName = this.resolveContactName(jid).displayName;
+    }
     this.schedulePersist();
     return contact;
   }
@@ -526,6 +596,9 @@ export class BridgeStore {
     const conv = this.data.conversations.find((c) => c.jid === jid);
     if (conv) {
       conv.name = this.resolveContactName(jid).displayName;
+    }
+    if (this.data.pinnedChatJid === jid) {
+      this.tgState.pinnedChatName = this.resolveContactName(jid).displayName;
     }
     this.schedulePersist();
     return true;

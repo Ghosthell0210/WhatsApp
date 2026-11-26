@@ -1,0 +1,7 @@
+{
+  "telegramBotToken": "",
+  "telegramChatId": "",
+  "whatsappPairingPhone": "",
+  "keepAliveUrl": "",
+  "keepAliveIntervalSec": 45
+}

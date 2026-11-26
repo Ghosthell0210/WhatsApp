@@ -216,6 +216,7 @@ export class ConsoleSessionController {
     const state = this.adapter.getPublicState();
     const hasTelegram =
       (state.telegram.status === 'connected' && state.telegram.hasToken) ||
+      Boolean(state.credentials?.hasTelegramToken) ||
       Boolean(process.env.TELEGRAM_BOT_TOKEN?.trim());
 
     if (!hasTelegram) {
@@ -398,7 +399,7 @@ export class ConsoleSessionController {
     this.log(' Configuración completada — Puente listo');
     this.log('==================================================');
     this.log(
-      'Tip Plugged Host: si reinicias el servidor, guarda TELEGRAM_BOT_TOKEN y TELEGRAM_CHAT_ID en las Variables del panel para que arranque conectado sin pedirlas de nuevo.',
+      'Credenciales guardadas automáticamente en credenciales.json: al reiniciar el servidor volverá a conectar solo sin pedirlas de nuevo.',
     );
     this.log('Escribe "help" para ver todos los comandos disponibles.\n');
   }
@@ -428,7 +429,10 @@ export class ConsoleSessionController {
           `  WhatsApp : ${s.whatsapp.status}${s.whatsapp.connectedPhone ? ` (${s.whatsapp.connectedPhone})` : ''}${s.whatsapp.pairingCode ? ` · Código: ${s.whatsapp.pairingCode}` : ''}`,
         );
         this.log(
-          `  Telegram : ${s.telegram.status}${s.telegram.botUsername ? ` (@${s.telegram.botUsername})` : ''} · Chat ID: ${s.telegram.chatId || 'sin definir'} · Token: ${s.telegram.tokenMasked || 'sin definir'}`,
+          `  Telegram : ${s.telegram.status}${s.telegram.botUsername ? ` (@${s.telegram.botUsername})` : ''} · Chat ID: ${s.telegram.chatId || 'sin definir'} · Fijado: ${s.telegram.pinnedChatName || 'ninguno'}`,
+        );
+        this.log(
+          `  Modo 24/7: ${s.rules.keepAliveEnabled ? 'ACTIVO' : 'INACTIVO'} · Credenciales: ${s.credentials?.hasTelegramToken ? 'guardadas (credenciales.json)' : 'pendientes'}`,
         );
         this.log(
           `  Reglas   : Reenvío=${s.rules.paused ? 'PAUSA' : 'ACTIVO'} · Solo PV=${s.rules.onlyPrivateMessages ? 'ON' : 'OFF'} · Ignorar estados=${s.rules.ignoreStatusBroadcasts ? 'ON' : 'OFF'} · Bloqueados=${s.rules.blockedJids.length}`,

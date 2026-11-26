@@ -10,6 +10,8 @@ import {
   Info,
   MapPin,
   Mic,
+  Pin,
+  PinOff,
   Search,
   Send,
   Smile,
@@ -23,6 +25,7 @@ import type {
   BridgeConversation,
   BridgeMessage,
   BridgeStats,
+  TelegramPublicState,
   WhatsAppPublicState,
 } from '../bridge/types';
 
@@ -31,9 +34,12 @@ interface InboxViewProps {
   contacts: BridgeContact[];
   stats: BridgeStats;
   whatsapp: WhatsAppPublicState;
+  telegram: TelegramPublicState;
   loading: boolean;
   onSelectConversation: (jid: string) => void;
   onToggleArchive: (jid: string) => Promise<unknown>;
+  onPinChat: (jid: string) => Promise<unknown>;
+  onUnpinChat: () => Promise<unknown>;
   onSendReply: (
     jid: string,
     text: string,
@@ -90,9 +96,12 @@ export function InboxView({
   contacts,
   stats,
   whatsapp,
+  telegram,
   loading,
   onSelectConversation,
   onToggleArchive,
+  onPinChat,
+  onUnpinChat,
   onSendReply,
   onClearSamples,
   onOpenTestModal,
@@ -237,6 +246,43 @@ export function InboxView({
           </p>
         </div>
       </section>
+
+      {telegram.pinnedChatJid && (
+        <section
+          aria-label="Chat fijado en Telegram"
+          className="bg-white border border-slate-200 rounded-xl px-4 py-3 flex flex-wrap items-center justify-between gap-3"
+        >
+          <div className="flex items-center gap-2.5 min-w-0 text-xs sm:text-sm">
+            <Pin className="w-4 h-4 text-teal-700 shrink-0" aria-hidden="true" />
+            <span className="font-semibold text-slate-900 truncate">
+              Chat fijado en Telegram: {telegram.pinnedChatName || telegram.pinnedChatJid}
+            </span>
+            <span className="text-slate-400 hidden sm:inline" aria-hidden="true">
+              ·
+            </span>
+            <span className="text-xs text-slate-500 hidden sm:inline">
+              Los mensajes directos sin Reply van a este contacto
+            </span>
+          </div>
+          <div className="flex items-center gap-2 shrink-0">
+            <button
+              type="button"
+              onClick={() => handleSelect(telegram.pinnedChatJid!)}
+              className="px-2.5 py-1.5 text-xs font-medium text-slate-700 bg-slate-100 hover:bg-slate-200 rounded-lg transition-colors whitespace-nowrap"
+            >
+              Abrir chat
+            </button>
+            <button
+              type="button"
+              onClick={() => void onUnpinChat()}
+              className="inline-flex items-center gap-1.5 px-2.5 py-1.5 text-xs font-medium text-rose-700 bg-rose-50 hover:bg-rose-100 rounded-lg transition-colors whitespace-nowrap"
+            >
+              <PinOff className="w-3.5 h-3.5" aria-hidden="true" />
+              <span>Desfijar</span>
+            </button>
+          </div>
+        </section>
+      )}
 
       {/* Master-detail conversation console */}
       <section
@@ -394,6 +440,14 @@ export function InboxView({
                           </span>
                         </>
                       )}
+                      {telegram.pinnedChatJid === conv.jid && (
+                        <>
+                          <span aria-hidden="true">·</span>
+                          <span className="font-sans font-semibold text-sky-700">
+                            Fijado
+                          </span>
+                        </>
+                      )}
                     </div>
 
                     <p className="text-xs text-slate-600 truncate">{conv.lastMessageText}</p>
@@ -455,6 +509,39 @@ export function InboxView({
                 </div>
 
                 <div className="flex items-center gap-2 shrink-0">
+                  {(() => {
+                    const isPinned = telegram.pinnedChatJid === activeConversation.jid;
+                    return (
+                      <button
+                        type="button"
+                        onClick={() =>
+                          void (isPinned ? onUnpinChat() : onPinChat(activeConversation.jid))
+                        }
+                        title={
+                          isPinned
+                            ? 'Desfijar este contacto en Telegram'
+                            : 'Fijar este contacto como chat directo en Telegram'
+                        }
+                        className={`inline-flex items-center gap-1.5 px-2.5 py-1.5 text-xs font-medium rounded-lg transition-colors whitespace-nowrap ${
+                          isPinned
+                            ? 'bg-teal-700 text-white hover:bg-teal-800'
+                            : 'text-slate-700 bg-slate-100 hover:bg-slate-200'
+                        }`}
+                      >
+                        {isPinned ? (
+                          <>
+                            <PinOff className="w-3.5 h-3.5" aria-hidden="true" />
+                            <span className="hidden sm:inline">Fijado</span>
+                          </>
+                        ) : (
+                          <>
+                            <Pin className="w-3.5 h-3.5" aria-hidden="true" />
+                            <span className="hidden sm:inline">Fijar chat</span>
+                          </>
+                        )}
+                      </button>
+                    );
+                  })()}
                   <button
                     type="button"
                     onClick={() => setShowContactModal(true)}

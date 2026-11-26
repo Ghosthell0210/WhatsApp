@@ -26,6 +26,9 @@ export default function App() {
     sendPipelineTest,
     markAsRead,
     toggleArchive,
+    pinChat,
+    unpinChat,
+    clearCredentials,
     clearSamples,
   } = useBridgeSocket();
 
@@ -51,6 +54,9 @@ export default function App() {
     chatId: '',
     lastError: null,
     lastDetectedChatId: null,
+    pinnedChatJid: null,
+    pinnedChatName: null,
+    pinnedStatusMessageId: null,
   };
 
   const fallbackStats = state?.stats ?? {
@@ -69,6 +75,8 @@ export default function App() {
     paused: false,
     blockedJids: [],
     reactionsEnabled: true,
+    keepAliveEnabled: true,
+    keepAliveUrl: '',
   };
 
   return (
@@ -108,9 +116,12 @@ export default function App() {
               contacts={state?.contacts ?? []}
               stats={fallbackStats}
               whatsapp={fallbackWa}
+              telegram={fallbackTg}
               loading={loading}
               onSelectConversation={(jid) => void markAsRead(jid)}
               onToggleArchive={toggleArchive}
+              onPinChat={pinChat}
+              onUnpinChat={unpinChat}
               onSendReply={sendReply}
               onClearSamples={clearSamples}
               onOpenTestModal={() => setTestModalOpen(true)}
@@ -125,17 +136,20 @@ export default function App() {
             <ConnectionsView
               whatsapp={fallbackWa}
               telegram={fallbackTg}
+              credentials={state?.credentials}
               onConnectWhatsApp={connectWhatsApp}
               onDisconnectWhatsApp={disconnectWhatsApp}
               onConnectTelegram={connectTelegram}
               onDisconnectTelegram={disconnectTelegram}
               onTestTelegram={testTelegram}
+              onClearCredentials={clearCredentials}
             />
           )}
 
           {activeTab === 'rules' && (
             <RulesAndLogView
               rules={fallbackRules}
+              keepAlive={state?.keepAlive}
               auditLog={state?.auditLog ?? []}
               onUpdateRules={updateRules}
             />

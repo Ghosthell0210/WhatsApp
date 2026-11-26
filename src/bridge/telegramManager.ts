@@ -28,7 +28,9 @@ const TG_SESSION_FILE = path.resolve(process.cwd(), 'data/tg-session.json');
 const TMP_TG_MEDIA_DIR = path.resolve(process.cwd(), 'data/tmp-media');
 
 export const TELEGRAM_BOT_COMMANDS = [
-  { command: 'estado', description: 'Ver conexión, RAM y contadores' },
+  { command: 'estado', description: 'Ver conexión, chat fijado y estado 24/7' },
+  { command: 'fijar', description: 'Fijar un contacto como chat directo' },
+  { command: 'desfijar', description: 'Quitar el chat fijado actual' },
   { command: 'chats', description: 'Lista de conversaciones recientes' },
   { command: 'buscar', description: 'Buscar contacto o chat por nombre' },
   { command: 'contactos', description: 'Ver libreta de contactos y alias' },
@@ -83,7 +85,12 @@ export type TelegramControlCommand =
 export class TelegramManager {
   private bot: Bot | null = null;
   private activeToken = '';
+  private lastChatId = '';
   private activeReplyJid: string | null = null;
+  private manualDisconnect = false;
+  private isConnecting = false;
+  private reconnectTimer: ReturnType<typeof setTimeout> | null = null;
+  private reconnectAttempts = 0;
   private callbackJidMap = new Map<string, string>();
   private store: BridgeStore;
   private onStateChange: (state: TelegramPublicState) => void;
@@ -150,20 +157,138 @@ export class TelegramManager {
       .text(isArchived ? '📥 Restaurar' : '🗄️ Archivar', this.encodeCallback('arch', jid));
   }
 
+  private buildPinnedCardKeyboard(jid: string): InlineKeyboard {
+    return new InlineKeyboard()
+      .text('📌 Desfijar', 'unpin')
+      .text('📋 Cambiar chat', 'pick_chat')
+      .row()
+      .text('📜 Historial', this.encodeCallback('hist', jid));
+  }
+
+  private buildContactPickerPrompt(): { text: string; keyboard: InlineKeyboard } {
+    const recent = this.store
+      .searchConversationsAndContacts('')
+      .filter((c) => !c.archived)
+      .slice(0, 3);
+    const kb = new InlineKeyboard();
+    for (const item of recent) {
+      kb.text(`📌 Fijar · ${item.displayName.slice(0, 22)}`, this.encodeCallback('pin', item.jid)).row();
+    }
+    kb.text('📋 Elegir contacto', 'pick_chat');
+    return {
+      text: [
+        '💬 <b>No hay ningún chat fijado</b>',
+        '',
+        'Elige un contacto para chatear directo aquí, o desliza (<i>Reply</i>) cualquier mensaje recibido para responderle.',
+      ].join('\n'),
+      keyboard: kb,
+    };
+  }
+
+  async pinContactChat(
+    jid: string,
+    chatIdOverride?: string,
+  ): Promise<{ ok: boolean; state: TelegramPublicState; note?: string }> {
+    const cleanJid = jid.trim();
+    const resolved = this.store.resolveContactName(cleanJid);
+    const tgState = this.store.getTelegramState();
+    const targetChatId = (chatIdOverride || tgState.chatId || '').trim();
+    const prevPinnedMsgId = tgState.pinnedStatusMessageId;
+    const prevPinnedName = tgState.pinnedChatName;
+
+    if (!this.bot || tgState.status !== 'connected' || !targetChatId) {
+      const next = this.store.setPinnedChat(cleanJid, null);
+      this.onStateChange(next);
+      return { ok: true, state: next, note: 'Chat fijado guardado (Telegram desconectado)' };
+    }
+
+    if (prevPinnedMsgId) {
+      await this.bot.api.unpinChatMessage(targetChatId, prevPinnedMsgId).catch(() => {});
+      await this.bot.api
+        .editMessageText(
+          targetChatId,
+          prevPinnedMsgId,
+          `🔄 <i>Chat fijado cambiado de ${escapeHtml(prevPinnedName || 'anterior')} a <b>${escapeHtml(resolved.displayName)}</b>.</i>`,
+          { parse_mode: 'HTML' },
+        )
+        .catch(() => {});
+    }
+
+    const cardHtml = [
+      '📌 <b>Chat fijado activo</b>',
+      `Contacto: <b>${escapeHtml(resolved.displayName)}</b>`,
+      `<code>${escapeHtml(resolved.phoneDisplay)}</code>`,
+      '',
+      '<i>Todo mensaje o archivo que envíes sin Reply irá directo a este contacto.</i>',
+      '<i>Si te escribe alguien más, desliza su mensaje (Reply) para responderle sin afectar este chat fijado.</i>',
+    ].join('\n');
+
+    const sent = await this.bot.api.sendMessage(targetChatId, cardHtml, {
+      parse_mode: 'HTML',
+      reply_markup: this.buildPinnedCardKeyboard(cleanJid),
+    });
+
+    let pinWarning: string | undefined;
+    try {
+      await this.bot.api.pinChatMessage(targetChatId, sent.message_id, {
+        disable_notification: true,
+      });
+    } catch {
+      pinWarning = 'No pude anclar la tarjeta arriba por permisos del chat, pero el chat fijado ya está activo.';
+    }
+
+    const next = this.store.setPinnedChat(cleanJid, sent.message_id);
+    this.onStateChange(next);
+    return { ok: true, state: next, note: pinWarning };
+  }
+
+  async unpinContactChat(cardMessageId?: number): Promise<{
+    hadPinned: boolean;
+    previousName: string | null;
+    state: TelegramPublicState;
+  }> {
+    const current = this.store.getTelegramState();
+    const hadPinned = Boolean(current.pinnedChatJid);
+    const previousName = current.pinnedChatName ?? null;
+    const msgIdToUnpin = cardMessageId ?? current.pinnedStatusMessageId ?? undefined;
+    const targetChatId = current.chatId;
+
+    if (this.bot && current.status === 'connected' && targetChatId && msgIdToUnpin) {
+      await this.bot.api.unpinChatMessage(targetChatId, msgIdToUnpin).catch(() => {});
+      await this.bot.api
+        .editMessageText(
+          targetChatId,
+          msgIdToUnpin,
+          `📌 <i>Chat desfijado${previousName ? ` (${escapeHtml(previousName)})` : ''}.</i>\nUsa 📌 <b>Fijar</b> en cualquier chat o escribe /chats para elegir otro.`,
+          { parse_mode: 'HTML' },
+        )
+        .catch(() => {});
+    }
+
+    const next = this.store.setPinnedChat(null, null);
+    this.onStateChange(next);
+    return { hadPinned, previousName, state: next };
+  }
+
   loadSavedSession(): { botToken: string; chatId: string } | null {
+    const creds = this.store.credentials.get();
+    if (creds.telegramBotToken) {
+      return {
+        botToken: creds.telegramBotToken,
+        chatId: creds.telegramChatId,
+      };
+    }
     try {
       if (!fs.existsSync(TG_SESSION_FILE)) return null;
       const parsed = JSON.parse(fs.readFileSync(TG_SESSION_FILE, 'utf-8')) as {
         botToken?: unknown;
         chatId?: unknown;
       };
-      if (
-        typeof parsed.botToken === 'string' &&
-        parsed.botToken.trim() &&
-        typeof parsed.chatId === 'string' &&
-        parsed.chatId.trim()
-      ) {
-        return { botToken: parsed.botToken.trim(), chatId: parsed.chatId.trim() };
+      if (typeof parsed.botToken === 'string' && parsed.botToken.trim()) {
+        return {
+          botToken: parsed.botToken.trim(),
+          chatId: typeof parsed.chatId === 'string' ? parsed.chatId.trim() : '',
+        };
       }
     } catch {
       // Ignore corrupt session file
@@ -172,7 +297,11 @@ export class TelegramManager {
   }
 
   private saveSessionFile(botToken: string, chatId: string): void {
-    if (!botToken.trim() || !chatId.trim()) return;
+    if (!botToken.trim()) return;
+    this.store.credentials.save({
+      telegramBotToken: botToken.trim(),
+      telegramChatId: chatId.trim(),
+    });
     try {
       fs.mkdirSync(path.dirname(TG_SESSION_FILE), { recursive: true });
       const tmp = `${TG_SESSION_FILE}.tmp`;
@@ -187,6 +316,7 @@ export class TelegramManager {
   }
 
   private clearSessionFile(): void {
+    this.store.credentials.clearTelegramCredentials();
     try {
       if (fs.existsSync(TG_SESSION_FILE)) {
         fs.rmSync(TG_SESSION_FILE, { force: true });
@@ -198,9 +328,12 @@ export class TelegramManager {
 
   setChatId(chatId: string): TelegramPublicState {
     const cleanChatId = chatId.trim();
+    this.lastChatId = cleanChatId;
     const next = this.store.setTelegramState({ chatId: cleanChatId });
     if (this.activeToken && cleanChatId) {
       this.saveSessionFile(this.activeToken, cleanChatId);
+    } else if (cleanChatId) {
+      this.store.credentials.save({ telegramChatId: cleanChatId });
     }
     this.onStateChange(next);
     return next;
@@ -291,8 +424,9 @@ export class TelegramManager {
       lines.push(
         `${badge}<b>${escapeHtml(item.displayName)}</b> · <code>${escapeHtml(item.phoneDisplay)}</code>\n<i>${escapeHtml(preview)}</i>`,
       );
-      kb.text(`↩️ ${item.displayName.slice(0, 18)}`, this.encodeCallback('reply', item.jid))
-        .text('📜 Historial', this.encodeCallback('hist', item.jid))
+      kb.text(`📌 Fijar ${item.displayName.slice(0, 14)}`, this.encodeCallback('pin', item.jid))
+        .text('↩️ Resp.', this.encodeCallback('reply', item.jid))
+        .text('📜 Hist.', this.encodeCallback('hist', item.jid))
         .row();
     }
 
@@ -336,10 +470,15 @@ export class TelegramManager {
   }
 
   async connect(token: string, chatId: string): Promise<TelegramPublicState> {
-    await this.disconnect(false);
+    this.clearReconnectTimer();
+    this.manualDisconnect = false;
+    this.isConnecting = true;
+    await this.disconnect(false, true);
 
     const trimmedToken = token.trim();
     const trimmedChatId = chatId.trim();
+    this.activeToken = trimmedToken;
+    this.lastChatId = trimmedChatId;
 
     const connectingState = this.store.setTelegramState({
       status: 'connecting',
@@ -353,6 +492,7 @@ export class TelegramManager {
     try {
       const bot = new Bot(trimmedToken);
       const me = await bot.api.getMe();
+      this.reconnectAttempts = 0;
       void bot.api.setMyCommands(TELEGRAM_BOT_COMMANDS).catch(() => {});
 
       bot.command(['start', 'id'], async (ctx) => {
@@ -373,8 +513,11 @@ export class TelegramManager {
           }
         }
 
+        const pinnedName = updated.pinnedChatName;
         await ctx.reply(
-          `<b>⚡ Puente WA-TG activo</b>\n\nTu Chat ID es: <code>${escapeHtml(detectedId)}</code> (autorizado).\n\n• Responde directamente a cualquier mensaje o pulsa <b>↩️ Responder</b>.\n• Puedes responder con texto, fotos, documentos, audios, notas de voz o videos.\n• Envía un archivo <code>.vcf</code> para importar tus contactos.\n• Usa /ayuda para ver todos los comandos.`,
+          `<b>⚡ Puente WA-TG activo</b>\n\nTu Chat ID es: <code>${escapeHtml(detectedId)}</code> (autorizado).\n${
+            pinnedName ? `\n📌 <b>Chat fijado actual:</b> ${escapeHtml(pinnedName)}\n` : ''
+          }\n• Pulsa <b>📌 Fijar</b> en cualquier contacto para chatear directo como un chat 1 a 1.\n• Desliza (<i>Reply</i>) cualquier mensaje recibido para responder sin perder tu chat fijado.\n• Puedes enviar texto, fotos, documentos, audios, notas de voz o videos.\n• Envía un archivo <code>.vcf</code> para importar tus contactos.\n• Usa /ayuda para ver todos los comandos.`,
           { parse_mode: 'HTML' },
         );
       });
@@ -396,7 +539,25 @@ export class TelegramManager {
         if (data === 'cancel_reply') {
           this.activeReplyJid = null;
           await ctx.answerCallbackQuery({ text: 'Modo respuesta cancelado' });
-          await ctx.editMessageText('❌ <i>Modo respuesta cancelado.</i>', { parse_mode: 'HTML' }).catch(() => {});
+          await ctx.editMessageText('❌ <i>Modo respuesta puntual cancelado.</i>', { parse_mode: 'HTML' }).catch(() => {});
+          return;
+        }
+
+        if (data === 'unpin') {
+          const res = await this.unpinContactChat(ctx.callbackQuery.message?.message_id);
+          await ctx.answerCallbackQuery({
+            text: res.hadPinned ? `Chat desfijado (${res.previousName || ''})` : 'No había chat fijado',
+          });
+          return;
+        }
+
+        if (data === 'pick_chat') {
+          const rendered = this.renderChatsPage(0);
+          await ctx.answerCallbackQuery();
+          await ctx.reply(rendered.text, {
+            parse_mode: 'HTML',
+            reply_markup: rendered.keyboard,
+          });
           return;
         }
 
@@ -426,17 +587,15 @@ export class TelegramManager {
         const resolved = this.store.resolveContactName(jid);
 
         if (action === 'pin') {
-          const msgId = ctx.callbackQuery.message?.message_id;
-          if (!msgId) {
-            await ctx.answerCallbackQuery({ text: 'No se pudo identificar el mensaje.' });
-            return;
-          }
           try {
-            await ctx.api.pinChatMessage(incomingChatId, msgId, { disable_notification: true });
-            this.store.setPinnedTelegramMessageId(jid, msgId);
-            await ctx.answerCallbackQuery({ text: `📌 Fijado: ${resolved.displayName}` });
+            const pinned = await this.pinContactChat(jid, incomingChatId);
+            await ctx.answerCallbackQuery({
+              text: pinned.note
+                ? `📌 Fijado: ${resolved.displayName} (${pinned.note.slice(0, 60)})`
+                : `📌 Chat fijado: ${resolved.displayName}`,
+            });
           } catch (err) {
-            const msg = err instanceof Error ? err.message : 'Sin permisos para fijar mensajes';
+            const msg = err instanceof Error ? err.message : 'Error al fijar contacto';
             await ctx.answerCallbackQuery({ text: `No se pudo fijar: ${msg.slice(0, 120)}`, show_alert: true });
           }
           return;
@@ -444,10 +603,15 @@ export class TelegramManager {
 
         if (action === 'reply') {
           this.activeReplyJid = jid;
+          const pinnedName = this.store.getTelegramState().pinnedChatName;
+          const pinnedNote =
+            pinnedName && this.store.getTelegramState().pinnedChatJid !== jid
+              ? `\n<i>(Tu chat fijado con <b>${escapeHtml(pinnedName)}</b> seguirá intacto.)</i>`
+              : '';
           await ctx.answerCallbackQuery({ text: `Respondiendo a ${resolved.displayName}` });
           const cancelKb = new InlineKeyboard().text('❌ Cancelar', 'cancel_reply');
           await ctx.reply(
-            `↩️ <b>Modo respuesta activo</b>\nDestinatario: <b>${escapeHtml(resolved.displayName)}</b> (<code>${escapeHtml(resolved.phoneDisplay)}</code>)\n\nEnvía tu mensaje, foto, audio, video o documento ahora.`,
+            `↩️ <b>Respuesta puntual activa</b>\nDestinatario: <b>${escapeHtml(resolved.displayName)}</b> (<code>${escapeHtml(resolved.phoneDisplay)}</code>)${pinnedNote}\n\nEnvía tu mensaje, foto, audio, video o documento ahora.`,
             { parse_mode: 'HTML', reply_markup: cancelKb },
           );
           return;
@@ -597,6 +761,48 @@ export class TelegramManager {
             return;
           }
 
+          // /fijar [nombre o número]
+          const pinMatch = text.match(/^\/fijar(?:@[A-Za-z0-9_]+)?(?:\s+(.+))?$/i);
+          if (pinMatch) {
+            const arg = (pinMatch[1] ?? '').trim();
+            let targetJid = this.resolveTargetJidFromReply(msg.reply_to_message) || '';
+            if (!targetJid && arg) {
+              const directJid = normalizePhoneToJid(arg);
+              if (directJid) {
+                targetJid = directJid;
+              } else {
+                const found = this.store.searchConversationsAndContacts(arg)[0];
+                if (found) targetJid = found.jid;
+              }
+            }
+            if (!targetJid) {
+              const rendered = this.renderChatsPage(0, arg);
+              await ctx.reply(
+                arg
+                  ? rendered.text
+                  : '📌 <b>Elige un contacto para fijar como chat directo</b> (o responde a un mensaje suyo con <code>/fijar</code>):',
+                { parse_mode: 'HTML', reply_markup: rendered.keyboard },
+              );
+              return;
+            }
+            await this.pinContactChat(targetJid, incomingChatId);
+            return;
+          }
+
+          // /desfijar
+          if (/^\/desfijar(?:@[A-Za-z0-9_]+)?$/i.test(text)) {
+            const res = await this.unpinContactChat();
+            if (!res.hadPinned) {
+              await ctx.reply('ℹ️ No hay ningún chat fijado actualmente.');
+            } else {
+              await ctx.reply(
+                `📌 Chat desfijado${res.previousName ? ` (<b>${escapeHtml(res.previousName)}</b>)` : ''}.`,
+                { parse_mode: 'HTML' },
+              );
+            }
+            return;
+          }
+
           // /contactos
           if (/^\/contactos(?:@[A-Za-z0-9_]+)?$/i.test(text)) {
             const state = this.store.getPublicState();
@@ -611,7 +817,9 @@ export class TelegramManager {
             const kb = new InlineKeyboard();
             const lines = top.map((c) => {
               const resolved = this.store.resolveContactName(c.jid);
-              kb.text(`↩️ ${resolved.displayName.slice(0, 20)}`, this.encodeCallback('reply', c.jid)).row();
+              kb.text(`📌 ${resolved.displayName.slice(0, 14)}`, this.encodeCallback('pin', c.jid))
+                .text('↩️ Resp.', this.encodeCallback('reply', c.jid))
+                .row();
               const tags = c.tags.length > 0 ? ` <i>[${escapeHtml(c.tags.join(', '))}]</i>` : '';
               return `• <b>${escapeHtml(resolved.displayName)}</b> · <code>${escapeHtml(c.phone)}</code>${tags}`;
             });
@@ -827,12 +1035,21 @@ export class TelegramManager {
           }
         }
 
-        // Resolve target JID from native Reply-to-Message OR active inline "↩️ Responder" mode
+        // Resolve target JID with strict non-destructive precedence:
+        // 1. Native Reply-to-Message (targets ONLY that contact without disturbing pinnedChatJid)
+        // 2. One-shot inline "↩️ Responder" mode (clears activeReplyJid without disturbing pinnedChatJid)
+        // 3. Persistent pinned contact (pinnedChatJid)
+        // 4. Otherwise prompt user to pick/pin a contact (never fail silently)
         const replyTo = msg.reply_to_message;
+        const pinnedChatJid = this.store.getTelegramState().pinnedChatJid || null;
         let targetJid = replyTo ? this.resolveTargetJidFromReply(replyTo) : null;
-        const usedActiveReply = !targetJid && Boolean(this.activeReplyJid);
-        if (!targetJid && this.activeReplyJid) {
+        let usedActiveReply = false;
+
+        if (!replyTo && this.activeReplyJid) {
           targetJid = this.activeReplyJid;
+          usedActiveReply = true;
+        } else if (!replyTo && !targetJid && pinnedChatJid) {
+          targetJid = pinnedChatJid;
         }
 
         if (!targetJid) {
@@ -841,6 +1058,13 @@ export class TelegramManager {
               '❌ No pude identificar el contacto de WhatsApp para ese mensaje. Responde a un mensaje reenviado por el puente o usa /chats.',
               { reply_parameters: { message_id: msg.message_id } },
             );
+          } else {
+            const prompt = this.buildContactPickerPrompt();
+            await ctx.reply(prompt.text, {
+              parse_mode: 'HTML',
+              reply_markup: prompt.keyboard,
+              reply_parameters: { message_id: msg.message_id },
+            });
           }
           return;
         }
@@ -972,6 +1196,7 @@ export class TelegramManager {
 
       this.bot = bot;
       this.activeToken = trimmedToken;
+      this.isConnecting = false;
 
       void bot
         .start({
@@ -985,6 +1210,9 @@ export class TelegramManager {
             lastError: message,
           });
           this.onStateChange(next);
+          if (!this.manualDisconnect && this.activeToken) {
+            this.scheduleReconnect(this.activeToken, this.lastChatId);
+          }
         });
 
       const connectedState = this.store.setTelegramState({
@@ -995,14 +1223,12 @@ export class TelegramManager {
         chatId: trimmedChatId,
         lastError: null,
       });
-      if (trimmedChatId) {
-        this.saveSessionFile(trimmedToken, trimmedChatId);
-      }
+      this.saveSessionFile(trimmedToken, trimmedChatId);
       this.onStateChange(connectedState);
       return connectedState;
     } catch (err) {
       this.bot = null;
-      this.activeToken = '';
+      this.isConnecting = false;
       const errMsg = err instanceof Error ? err.message : 'No se pudo conectar con Telegram Bot API';
       const failedState = this.store.setTelegramState({
         status: 'error',
@@ -1010,7 +1236,66 @@ export class TelegramManager {
         lastError: errMsg,
       });
       this.onStateChange(failedState);
+      if (!this.manualDisconnect && trimmedToken) {
+        this.scheduleReconnect(trimmedToken, trimmedChatId);
+      }
       return failedState;
+    }
+  }
+
+  private clearReconnectTimer(): void {
+    if (this.reconnectTimer) {
+      clearTimeout(this.reconnectTimer);
+      this.reconnectTimer = null;
+    }
+  }
+
+  private scheduleReconnect(token: string, chatId: string): void {
+    if (this.manualDisconnect || !token.trim() || this.reconnectTimer) return;
+    this.reconnectAttempts += 1;
+    const delayMs = Math.min(30_000, 5_000 * Math.pow(2, Math.min(3, this.reconnectAttempts - 1)));
+    this.reconnectTimer = setTimeout(() => {
+      this.reconnectTimer = null;
+      if (!this.manualDisconnect && token.trim()) {
+        void this.connect(token, chatId);
+      }
+    }, delayMs);
+    if (typeof this.reconnectTimer.unref === 'function') {
+      this.reconnectTimer.unref();
+    }
+  }
+
+  getReconnectAttempts(): number {
+    return this.reconnectAttempts;
+  }
+
+  async ensureAwake(): Promise<boolean> {
+    if (this.manualDisconnect || this.isConnecting || this.reconnectTimer) {
+      return false;
+    }
+    const saved = this.loadSavedSession();
+    const token = this.activeToken || saved?.botToken || '';
+    const chatId = this.lastChatId || this.store.getTelegramState().chatId || saved?.chatId || '';
+    if (!token) return false;
+
+    const status = this.store.getTelegramState().status;
+    if (!this.bot || status !== 'connected') {
+      console.log('[Keep-Alive] Bot de Telegram desconectado detectado. Reconectando...');
+      await this.connect(token, chatId);
+      return false;
+    }
+
+    try {
+      await Promise.race([
+        this.bot.api.getMe(),
+        new Promise((_, reject) => setTimeout(() => reject(new Error('Telegram getMe timeout')), 8000)),
+      ]);
+      return true;
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : 'Timeout de Telegram';
+      console.log(`[Keep-Alive] Telegram no respondió al latido (${msg}). Reiniciando bot...`);
+      await this.connect(token, chatId);
+      return false;
     }
   }
 
@@ -1283,7 +1568,11 @@ export class TelegramManager {
     }
   }
 
-  async disconnect(clearToken = true): Promise<TelegramPublicState> {
+  async disconnect(clearToken = true, internalReconnect = false): Promise<TelegramPublicState> {
+    if (!internalReconnect) {
+      this.manualDisconnect = clearToken;
+      this.clearReconnectTimer();
+    }
     if (this.bot) {
       try {
         await this.bot.stop();
@@ -1294,6 +1583,7 @@ export class TelegramManager {
     }
     if (clearToken) {
       this.activeToken = '';
+      this.lastChatId = '';
       this.clearSessionFile();
     }
 

@@ -88,6 +88,7 @@ export class WhatsAppManager {
   private pendingPairingPhone: string | null = null;
   private pairingCodeRequested = false;
   private reconnectTimer: ReturnType<typeof setTimeout> | null = null;
+  private reconnectAttempts = 0;
   private store: BridgeStore;
   private onStateChange: (state: WhatsAppPublicState) => void;
   private onIncomingMessage: (payload: WhatsAppInboundPayload) => Promise<void>;
@@ -213,6 +214,10 @@ export class WhatsAppManager {
         logger: pino({ level: 'silent' }),
         browser: Browsers.ubuntu('Chrome'),
         qrTimeout: 90_000,
+        connectTimeoutMs: 60_000,
+        defaultQueryTimeoutMs: 60_000,
+        keepAliveIntervalMs: 25_000,
+        retryRequestDelayMs: 2_000,
         syncFullHistory: false,
         printQRInTerminal: false,
         markOnlineOnConnect: false,
@@ -295,6 +300,7 @@ export class WhatsAppManager {
           this.isConnecting = false;
           this.pendingPairingPhone = null;
           this.pairingCodeRequested = false;
+          this.reconnectAttempts = 0;
           pairingConfirmed = true;
           const userJid = sock.user?.id ? jidNormalizedUser(sock.user.id) : null;
           const phone = userJid ? formatPhoneDisplay(userJid) : null;
@@ -338,16 +344,7 @@ export class WhatsAppManager {
           }
 
           if (!this.manualDisconnect && !isLoggedOut && statusCode !== DisconnectReason.badSession) {
-            const next = this.store.setWhatsAppState({
-              status: 'connecting',
-              qrDataUrl: null,
-              pairingCode: null,
-              lastError: 'Reconectando sesión de WhatsApp...',
-            });
-            this.notifyState(next);
-            this.reconnectTimer = setTimeout(() => {
-              void this.connect();
-            }, 3000);
+            this.scheduleReconnect('Reconectando sesión de WhatsApp...');
           } else {
             this.pendingPairingPhone = null;
             this.pairingCodeRequested = false;
@@ -481,8 +478,62 @@ export class WhatsAppManager {
         lastError: errMsg,
       });
       this.notifyState(next);
+      if (!this.manualDisconnect && this.hasSavedSession()) {
+        this.scheduleReconnect(`Reintentando conexión WhatsApp tras error: ${errMsg}`);
+      }
       return next;
     }
+  }
+
+  private scheduleReconnect(reason: string): void {
+    this.clearReconnectTimer();
+    this.reconnectAttempts += 1;
+    const delayMs = Math.min(30_000, 3_000 * Math.pow(2, Math.min(4, this.reconnectAttempts - 1)));
+    const next = this.store.setWhatsAppState({
+      status: 'connecting',
+      qrDataUrl: null,
+      pairingCode: null,
+      lastError: reason,
+    });
+    this.notifyState(next);
+    this.reconnectTimer = setTimeout(() => {
+      this.reconnectTimer = null;
+      if (!this.manualDisconnect) {
+        void this.connect();
+      }
+    }, delayMs);
+    if (typeof this.reconnectTimer.unref === 'function') {
+      this.reconnectTimer.unref();
+    }
+  }
+
+  getReconnectAttempts(): number {
+    return this.reconnectAttempts;
+  }
+
+  async ensureAwake(): Promise<boolean> {
+    if (this.manualDisconnect) return false;
+    if (!this.hasSavedSession()) return false;
+    if (this.isConnecting || this.reconnectTimer) return true;
+
+    const status = this.store.getWhatsAppState().status;
+    if (status !== 'connected' || !this.sock) {
+      console.log('[Keep-Alive] WhatsApp inactivo detectado con sesión guardada. Reconectando...');
+      await this.connect();
+      return false;
+    }
+
+    // Detect silently closed WebSocket on Baileys socket
+    const wsObj = this.sock.ws as unknown as { isOpen?: boolean; readyState?: number } | undefined;
+    if (wsObj && (wsObj.isOpen === false || (typeof wsObj.readyState === 'number' && wsObj.readyState > 1))) {
+      console.log('[Keep-Alive] Socket de WhatsApp dormido/cerrado detectado. Reiniciando conexión...');
+      await this.disconnect(false);
+      this.manualDisconnect = false;
+      await this.connect();
+      return false;
+    }
+
+    return true;
   }
 
   private async streamMediaToTempFile(

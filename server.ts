@@ -24,6 +24,8 @@ async function startServer() {
   const coordinator = new BridgeCoordinator(store);
 
   const server = http.createServer(app);
+  server.keepAliveTimeout = 65_000;
+  server.headersTimeout = 66_000;
   const wss = new WebSocketServer({ server, path: '/ws' });
 
   const broadcast = (event: BridgeWsEvent) => {
@@ -45,9 +47,31 @@ async function startServer() {
     ws.send(JSON.stringify(initEvent));
   });
 
+  // Health & Anti-Sleep Endpoints
+  app.get(['/health', '/ping'], (_req, res) => {
+    const state = coordinator.getPublicState();
+    res.json({
+      ok: true,
+      status: 'awake',
+      uptimeSec: Math.floor(process.uptime()),
+      whatsapp: state.whatsapp.status,
+      telegram: state.telegram.status,
+      keepAlive: state.keepAlive,
+    });
+  });
+
   // REST API Endpoints
   app.get('/api/state', (_req, res) => {
     res.json(coordinator.getPublicState());
+  });
+
+  app.get('/api/credentials', (_req, res) => {
+    res.json({ ok: true, credentials: coordinator.store.getCredentialsSummary() });
+  });
+
+  app.delete('/api/credentials', (_req, res) => {
+    coordinator.clearSavedCredentials();
+    res.json({ ok: true, credentials: coordinator.store.getCredentialsSummary() });
   });
 
   app.post('/api/telegram/connect', async (req, res) => {
@@ -91,6 +115,22 @@ async function startServer() {
     res.json(result);
   });
 
+  app.post('/api/telegram/pin', async (req, res) => {
+    const rawJid = typeof req.body?.jid === 'string' ? req.body.jid.trim() : '';
+    const jid = normalizePhoneToJid(rawJid);
+    if (!jid) {
+      res.status(400).json({ ok: false, message: 'JID o número inválido para fijar.' });
+      return;
+    }
+    const result = await coordinator.telegram.pinContactChat(jid);
+    res.json({ ok: result.ok, telegram: result.state, note: result.note });
+  });
+
+  app.post('/api/telegram/unpin', async (_req, res) => {
+    const result = await coordinator.telegram.unpinContactChat();
+    res.json({ ok: true, telegram: result.state, hadPinned: result.hadPinned });
+  });
+
   app.post('/api/whatsapp/connect', async (req, res) => {
     const rawPhone = typeof req.body?.pairingPhone === 'string' ? req.body.pairingPhone.trim() : '';
     if (rawPhone) {
@@ -102,6 +142,7 @@ async function startServer() {
         });
         return;
       }
+      coordinator.saveWhatsAppPairingPhone(cleanPhone);
       const waState = await coordinator.whatsapp.connect({ pairingPhone: cleanPhone });
       res.json({ ok: true, whatsapp: waState });
       return;
@@ -141,6 +182,12 @@ async function startServer() {
     }
     if (typeof body.reactionsEnabled === 'boolean') {
       nextPartial.reactionsEnabled = body.reactionsEnabled;
+    }
+    if (typeof body.keepAliveEnabled === 'boolean') {
+      nextPartial.keepAliveEnabled = body.keepAliveEnabled;
+    }
+    if (typeof body.keepAliveUrl === 'string') {
+      nextPartial.keepAliveUrl = body.keepAliveUrl.trim().slice(0, 300);
     }
     if (Array.isArray(body.blockedJids)) {
       const normalized = body.blockedJids
@@ -346,7 +393,12 @@ async function startServer() {
         coordinator.telegram.setChatId(chatId);
       },
       onTelegramChatIdDetected: (listener) => coordinator.telegram.onChatIdDetected(listener),
-      connectWhatsApp: (options) => coordinator.whatsapp.connect(options),
+      connectWhatsApp: (options) => {
+        if (options?.pairingPhone) {
+          coordinator.saveWhatsAppPairingPhone(options.pairingPhone);
+        }
+        return coordinator.whatsapp.connect(options);
+      },
       disconnectWhatsApp: (logout) => coordinator.whatsapp.disconnect(logout),
       hasSavedWhatsAppSession: () => coordinator.whatsapp.hasSavedSession(),
       updateRules: (partial) => coordinator.updateRules(partial),
@@ -354,6 +406,7 @@ async function startServer() {
     });
 
     void coordinator.bootstrapFromEnv().then(() => {
+      coordinator.startKeepAlive(PORT);
       const wizardStarted = consoleController.startInitialWizardIfNeeded();
       if (!wizardStarted) {
         console.log('[Puente WA-TG] Consola lista. Escribe "help" para ver comandos o "setup" para reconfigurar.');
@@ -363,6 +416,7 @@ async function startServer() {
 
   const gracefulShutdown = (signal: string) => {
     console.log(`[Puente WA-TG] Señal ${signal} recibida, guardando historial en disco...`);
+    coordinator.stopKeepAlive();
     store.flushToDisk();
     cleanupTempMediaDir();
     server.close(() => {

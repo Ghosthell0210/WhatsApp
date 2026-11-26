@@ -24,6 +24,9 @@ export class BridgeCoordinator {
   public readonly telegram: TelegramManager;
   private listeners = new Set<(event: BridgeWsEvent) => void>();
   private lastNotifiedPairingCode: string | null = null;
+  private keepAliveTimer: ReturnType<typeof setInterval> | null = null;
+  private keepAlivePort = 3000;
+  private keepAliveRunning = false;
 
   constructor(store: BridgeStore) {
     this.store = store;
@@ -66,6 +69,7 @@ export class BridgeCoordinator {
       store,
       onStateChange: (tgState) => {
         this.emit({ type: 'tg:status', payload: tgState });
+        this.emit({ type: 'credentials:updated', payload: this.store.getCredentialsSummary() });
       },
       onReplyReceived: async ({ jid, text, telegramMessageId }) => {
         return this.sendOutboundReply({
@@ -90,6 +94,7 @@ export class BridgeCoordinator {
         if (this.store.getWhatsAppState().status === 'connected') {
           return 'WhatsApp ya está vinculado y activo.';
         }
+        this.saveWhatsAppPairingPhone(cleanPhone);
         void this.whatsapp.connect({ pairingPhone: cleanPhone });
         return `Generando código de 8 dígitos para +${cleanPhone}... Te lo enviaré aquí en unos segundos.`;
       },
@@ -158,9 +163,19 @@ export class BridgeCoordinator {
           ? `Conectado (${s.whatsapp.connectedPhone || 'activo'})`
           : s.whatsapp.status;
 
+      const pinnedLabel = s.telegram.pinnedChatName
+        ? `${s.telegram.pinnedChatName} (${formatPhoneDisplay(s.telegram.pinnedChatJid || '')})`
+        : 'Ninguno';
+      const keepAliveLabel = s.rules.keepAliveEnabled
+        ? `🟢 Despierto 24/7 (cada ${s.keepAlive?.intervalSec ?? 45}s)`
+        : '⚪ Desactivado';
+
       return [
         '<b>📊 Estado de Puente WA-TG</b>',
         `• <b>WhatsApp:</b> ${escapeHtml(waLine)}`,
+        `• <b>Chat fijado:</b> ${escapeHtml(pinnedLabel)}`,
+        `• <b>Modo 24/7:</b> ${escapeHtml(keepAliveLabel)}`,
+        `• <b>Credenciales:</b> ${s.credentials?.hasTelegramToken ? 'Guardadas en credenciales.json' : 'Pendientes'}`,
         `• <b>Reenvío:</b> ${s.rules.paused ? '⏸️ EN PAUSA' : '🟢 ACTIVO'}`,
         `• <b>Reacciones en vivo:</b> ${s.rules.reactionsEnabled ? '❤️ Activas' : '🔕 Silenciadas'}`,
         `• <b>Solo PV:</b> ${s.rules.onlyPrivateMessages ? 'Sí' : 'No'}`,
@@ -334,6 +349,11 @@ export class BridgeCoordinator {
     return [
       '<b>🤖 Comandos de Puente WA-TG</b>',
       '',
+      '<b>Chat Fijado 1 a 1:</b>',
+      '• <code>/fijar Nombre</code> — Fijar contacto como chat directo',
+      '• <code>/desfijar</code> — Quitar el chat fijado actual',
+      '• <i>Responde con Reply nativo a otro contacto sin perder tu chat fijado</i>',
+      '',
       '<b>Contactos y Alias:</b>',
       '• <code>/nuevo Nombre</code> o <code>/n Nombre</code> — Alias manual (por reply)',
       '• <code>/renombrar Nombre</code> — Cambiar alias',
@@ -382,30 +402,48 @@ export class BridgeCoordinator {
     if (process.env.IGNORE_STATUS_BROADCASTS === 'true' || process.env.IGNORE_STATUS_BROADCASTS === 'false') {
       ruleOverrides.ignoreStatusBroadcasts = process.env.IGNORE_STATUS_BROADCASTS === 'true';
     }
+    if (process.env.KEEP_ALIVE_ENABLED === 'true' || process.env.KEEP_ALIVE_ENABLED === 'false') {
+      ruleOverrides.keepAliveEnabled = process.env.KEEP_ALIVE_ENABLED === 'true';
+    }
+    if (process.env.KEEP_ALIVE_URL?.trim()) {
+      ruleOverrides.keepAliveUrl = process.env.KEEP_ALIVE_URL.trim();
+    }
     if (Object.keys(ruleOverrides).length > 0) {
       this.updateRules(ruleOverrides);
     }
 
     const envToken = process.env.TELEGRAM_BOT_TOKEN?.trim() ?? '';
     const envChatId = process.env.TELEGRAM_CHAT_ID?.trim() ?? '';
-    const savedSession = !envToken ? this.telegram.loadSavedSession() : null;
-    const bootToken = envToken || savedSession?.botToken || '';
-    const bootChatId = envChatId || savedSession?.chatId || '';
+    const savedCreds = this.store.credentials.get();
+    const savedSession = this.telegram.loadSavedSession();
+    const bootToken = envToken || savedCreds.telegramBotToken || savedSession?.botToken || '';
+    const bootChatId = envChatId || savedCreds.telegramChatId || savedSession?.chatId || '';
+
+    if (bootToken && (envToken || envChatId)) {
+      this.store.credentials.save({
+        telegramBotToken: bootToken,
+        telegramChatId: bootChatId,
+      });
+    }
 
     if (bootToken) {
       const tgState = await this.telegram.connect(bootToken, bootChatId);
       if (tgState.status === 'connected') {
         console.log(
-          `[Telegram] ${envToken ? 'Bot conectado desde variables de entorno' : 'Sesión guardada restaurada'} (@${tgState.botUsername}) -> Chat ID ${tgState.chatId || 'pendiente de auto-autorización al enviar /start'}`,
+          `[Telegram] ${envToken ? 'Bot conectado desde variables de entorno' : 'Credenciales restauradas automáticamente'} (@${tgState.botUsername}) -> Chat ID ${tgState.chatId || 'pendiente de auto-autorización al enviar /start'}`,
         );
       } else {
-        console.log(`[Telegram] Error al conectar: ${tgState.lastError}`);
+        console.log(`[Telegram] Reintentando conexión en segundo plano: ${tgState.lastError}`);
       }
     } else {
-      console.log('[Telegram] Sin configurar aún. Define TELEGRAM_BOT_TOKEN o escribe: tg <token> <chatId>');
+      console.log('[Telegram] Sin configurar aún. Define credenciales en credenciales.json o escribe: setup');
     }
 
-    const pairingPhone = process.env.WA_PAIRING_PHONE?.trim() || undefined;
+    const envPairingPhone = process.env.WA_PAIRING_PHONE?.trim() || '';
+    if (envPairingPhone) {
+      this.saveWhatsAppPairingPhone(envPairingPhone);
+    }
+    const pairingPhone = envPairingPhone || savedCreds.whatsappPairingPhone || undefined;
     const forceQrOnBoot = process.env.WA_AUTH_MODE === 'qr' && process.env.WA_AUTO_CONNECT === 'true';
 
     if (this.whatsapp.hasSavedSession()) {
@@ -421,6 +459,117 @@ export class BridgeCoordinator {
     } else {
       console.log('[WhatsApp] Sin vincular aún. Se solicitará tu número para generar código de 8 dígitos (sin QR).');
     }
+
+    this.emit({ type: 'credentials:updated', payload: this.store.getCredentialsSummary() });
+  }
+
+  saveWhatsAppPairingPhone(phone: string): void {
+    const clean = sanitizePairingPhoneNumber(phone) || phone.trim();
+    if (!clean) return;
+    this.store.credentials.save({ whatsappPairingPhone: clean });
+    this.emit({ type: 'credentials:updated', payload: this.store.getCredentialsSummary() });
+  }
+
+  clearSavedCredentials(): void {
+    this.store.credentials.clearAll();
+    this.emit({ type: 'credentials:updated', payload: this.store.getCredentialsSummary() });
+  }
+
+  startKeepAlive(port: number): void {
+    this.keepAlivePort = port;
+    this.stopKeepAlive();
+
+    const creds = this.store.credentials.get();
+    const intervalSec = Math.max(15, Math.min(300, creds.keepAliveIntervalSec || 45));
+    const rules = this.store.getRules();
+    const targetUrl = this.resolveKeepAliveTargetUrl(rules, creds.keepAliveUrl);
+
+    const nextState = this.store.setKeepAliveState({
+      enabled: rules.keepAliveEnabled,
+      intervalSec,
+      targetUrl,
+    });
+    this.emit({ type: 'keepalive:status', payload: nextState });
+
+    console.log(
+      `[Keep-Alive] Supervisor 24/7 activo (latido cada ${intervalSec}s -> ${targetUrl})`,
+    );
+
+    this.keepAliveTimer = setInterval(() => {
+      void this.runKeepAliveBeat();
+    }, intervalSec * 1000);
+  }
+
+  stopKeepAlive(): void {
+    if (this.keepAliveTimer) {
+      clearInterval(this.keepAliveTimer);
+      this.keepAliveTimer = null;
+    }
+  }
+
+  private resolveKeepAliveTargetUrl(rules: RoutingRules, credsUrl?: string): string {
+    const custom =
+      rules.keepAliveUrl?.trim() ||
+      credsUrl?.trim() ||
+      process.env.KEEP_ALIVE_URL?.trim() ||
+      process.env.APP_URL?.trim() ||
+      '';
+    if (custom && /^https?:\/\//i.test(custom) && !custom.includes('MY_APP_URL')) {
+      return custom.endsWith('/health') || custom.endsWith('/ping')
+        ? custom
+        : `${custom.replace(/\/+$/, '')}/health`;
+    }
+    return `http://127.0.0.1:${this.keepAlivePort}/health`;
+  }
+
+  async runKeepAliveBeat(): Promise<void> {
+    if (this.keepAliveRunning) return;
+    this.keepAliveRunning = true;
+    try {
+      const rules = this.store.getRules();
+      const creds = this.store.credentials.get();
+      const targetUrl = this.resolveKeepAliveTargetUrl(rules, creds.keepAliveUrl);
+
+      if (!rules.keepAliveEnabled) {
+        const disabledState = this.store.setKeepAliveState({
+          enabled: false,
+          targetUrl,
+          lastBeatAt: Date.now(),
+        });
+        this.emit({ type: 'keepalive:status', payload: disabledState });
+        return;
+      }
+
+      await Promise.allSettled([
+        this.whatsapp.ensureAwake(),
+        this.telegram.ensureAwake(),
+      ]);
+
+      let pingOk = false;
+      try {
+        const res = await fetch(targetUrl, {
+          method: 'GET',
+          signal: AbortSignal.timeout(8000),
+          headers: { 'User-Agent': 'Puente-WA-TG-KeepAlive/1.0' },
+        });
+        pingOk = res.ok;
+      } catch {
+        pingOk = false;
+      }
+
+      const updated = this.store.setKeepAliveState({
+        enabled: true,
+        targetUrl,
+        lastBeatAt: Date.now(),
+        lastHttpPingAt: Date.now(),
+        lastHttpPingOk: pingOk,
+        reconnectAttemptsWa: this.whatsapp.getReconnectAttempts(),
+        reconnectAttemptsTg: this.telegram.getReconnectAttempts(),
+      });
+      this.emit({ type: 'keepalive:status', payload: updated });
+    } finally {
+      this.keepAliveRunning = false;
+    }
   }
 
   getPublicState(): BridgePublicState {
@@ -429,6 +578,18 @@ export class BridgeCoordinator {
 
   updateRules(partial: Partial<RoutingRules>): RoutingRules {
     const updated = this.store.updateRules(partial);
+    if (typeof partial.keepAliveUrl === 'string') {
+      this.store.credentials.save({ keepAliveUrl: updated.keepAliveUrl || '' });
+      this.emit({ type: 'credentials:updated', payload: this.store.getCredentialsSummary() });
+    }
+    if (typeof partial.keepAliveEnabled === 'boolean' || typeof partial.keepAliveUrl === 'string') {
+      const creds = this.store.credentials.get();
+      const nextKa = this.store.setKeepAliveState({
+        enabled: updated.keepAliveEnabled,
+        targetUrl: this.resolveKeepAliveTargetUrl(updated, creds.keepAliveUrl),
+      });
+      this.emit({ type: 'keepalive:status', payload: nextKa });
+    }
     this.emit({ type: 'rules:updated', payload: updated });
     return updated;
   }

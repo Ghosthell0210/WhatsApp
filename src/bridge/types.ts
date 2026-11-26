@@ -91,6 +91,8 @@ export interface RoutingRules {
   paused: boolean;
   blockedJids: string[];
   reactionsEnabled: boolean;
+  keepAliveEnabled: boolean;
+  keepAliveUrl?: string;
 }
 
 export interface WhatsAppMediaPayload {
@@ -139,6 +141,32 @@ export interface TelegramPublicState {
   chatId: string;
   lastError: string | null;
   lastDetectedChatId: string | null;
+  pinnedChatJid?: string | null;
+  pinnedChatName?: string | null;
+  pinnedStatusMessageId?: number | null;
+}
+
+export interface CredentialsSummary {
+  filePath: string;
+  hasTelegramToken: boolean;
+  telegramTokenMasked: string;
+  hasTelegramChatId: boolean;
+  telegramChatId: string;
+  whatsappPairingPhone: string;
+  keepAliveUrl: string;
+  keepAliveIntervalSec: number;
+  updatedAt: number | null;
+}
+
+export interface KeepAliveState {
+  enabled: boolean;
+  intervalSec: number;
+  lastBeatAt: number | null;
+  lastHttpPingAt: number | null;
+  lastHttpPingOk: boolean | null;
+  targetUrl: string;
+  reconnectAttemptsWa: number;
+  reconnectAttemptsTg: number;
 }
 
 export interface BridgeStats {
@@ -156,6 +184,8 @@ export interface BridgePublicState {
   contacts: BridgeContact[];
   auditLog: AuditLogEntry[];
   stats: BridgeStats;
+  credentials?: CredentialsSummary;
+  keepAlive?: KeepAliveState;
 }
 
 export type BridgeWsEvent =
@@ -167,4 +197,7 @@ export type BridgeWsEvent =
   | { type: 'message:updated'; payload: { conversation: BridgeConversation; message: BridgeMessage } }
   | { type: 'conversation:updated'; payload: BridgeConversation }
   | { type: 'contacts:updated'; payload: BridgeContact[] }
+  | { type: 'keepalive:status'; payload: KeepAliveState }
+  | { type: 'credentials:updated'; payload: CredentialsSummary }
   | { type: 'log:new'; payload: { entry: AuditLogEntry; stats: BridgeStats } };
+

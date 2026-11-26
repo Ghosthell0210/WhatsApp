@@ -1,10 +1,11 @@
 import { useEffect, useMemo, useState } from 'react';
 import { Search } from 'lucide-react';
 import { formatPhoneDisplay, normalizePhoneToJid } from '../bridge/logic';
-import type { AuditLogEntry, RoutingRules } from '../bridge/types';
+import type { AuditLogEntry, KeepAliveState, RoutingRules } from '../bridge/types';
 
 interface RulesAndLogViewProps {
   rules: RoutingRules;
+  keepAlive?: KeepAliveState;
   auditLog: AuditLogEntry[];
   onUpdateRules: (partial: Partial<RoutingRules>) => Promise<unknown>;
 }
@@ -40,10 +41,11 @@ function actionLabel(action: AuditLogEntry['action']): { label: string; colorCla
   }
 }
 
-export function RulesAndLogView({ rules, auditLog, onUpdateRules }: RulesAndLogViewProps) {
+export function RulesAndLogView({ rules, keepAlive, auditLog, onUpdateRules }: RulesAndLogViewProps) {
   const [search, setSearch] = useState('');
   const [actionFilter, setActionFilter] = useState<LogActionFilter>('all');
   const [autoMsgDraft, setAutoMsgDraft] = useState(rules.autoAckMessage);
+  const [keepAliveUrlDraft, setKeepAliveUrlDraft] = useState(rules.keepAliveUrl || '');
   const [blockInput, setBlockInput] = useState('');
   const [blockError, setBlockError] = useState<string | null>(null);
   const [savingRule, setSavingRule] = useState(false);
@@ -51,6 +53,10 @@ export function RulesAndLogView({ rules, auditLog, onUpdateRules }: RulesAndLogV
   useEffect(() => {
     setAutoMsgDraft(rules.autoAckMessage);
   }, [rules.autoAckMessage]);
+
+  useEffect(() => {
+    setKeepAliveUrlDraft(rules.keepAliveUrl || '');
+  }, [rules.keepAliveUrl]);
 
   const filteredLogs = useMemo(() => {
     const q = search.trim().toLowerCase();
@@ -231,6 +237,66 @@ export function RulesAndLogView({ rules, auditLog, onUpdateRules }: RulesAndLogV
               onChange={(e) => void handleToggle('reactionsEnabled', e.target.checked)}
               className="w-5 h-5 accent-teal-700 rounded cursor-pointer shrink-0"
             />
+          </div>
+
+          <div className="py-3.5 space-y-3">
+            <div className="flex items-center justify-between gap-4">
+              <div>
+                <label htmlFor="rule-keep-alive" className="text-sm font-medium text-slate-900 block">
+                  Modo despierto 24/7 (Keep-Alive anti-suspensión)
+                </label>
+                <p className="text-xs text-slate-500">
+                  Mantiene el proceso, WhatsApp y el polling de Telegram activos con vigilancia automática y auto-ping HTTP cada{' '}
+                  <span className="font-mono tabular-nums">{keepAlive?.intervalSec ?? 45}s</span>.
+                </p>
+                {keepAlive?.lastBeatAt && (
+                  <p className="mt-1 font-mono tabular-nums text-[11px] text-emerald-700">
+                    Último latido: {formatLogTimestamp(keepAlive.lastBeatAt)} · Ping HTTP:{' '}
+                    {keepAlive.lastHttpPingOk ? 'OK' : 'Pendiente'}
+                  </p>
+                )}
+              </div>
+              <input
+                id="rule-keep-alive"
+                type="checkbox"
+                checked={rules.keepAliveEnabled}
+                onChange={(e) => void handleToggle('keepAliveEnabled', e.target.checked)}
+                className="w-5 h-5 accent-teal-700 rounded cursor-pointer shrink-0"
+              />
+            </div>
+
+            {rules.keepAliveEnabled && (
+              <form
+                onSubmit={async (e) => {
+                  e.preventDefault();
+                  setSavingRule(true);
+                  try {
+                    await onUpdateRules({ keepAliveUrl: keepAliveUrlDraft.trim() });
+                  } finally {
+                    setSavingRule(false);
+                  }
+                }}
+                className="flex flex-col sm:flex-row gap-2.5 pt-1"
+              >
+                <label htmlFor="keep-alive-url" className="sr-only">
+                  URL pública opcional para auto-ping Keep-Alive
+                </label>
+                <input
+                  id="keep-alive-url"
+                  type="url"
+                  value={keepAliveUrlDraft}
+                  onChange={(e) => setKeepAliveUrlDraft(e.target.value)}
+                  placeholder="URL pública opcional (ej. https://tu-app.host/health) o vacío para ping local"
+                  className="flex-1 px-3.5 py-2 text-xs font-mono bg-slate-50 border border-slate-200 rounded-lg text-slate-900 placeholder:font-sans placeholder:text-slate-400 focus:outline-none focus:ring-2 focus:ring-teal-700/20 focus:border-teal-700"
+                />
+                <button
+                  type="submit"
+                  className="px-4 py-2 text-xs font-medium text-white bg-teal-700 hover:bg-teal-800 rounded-lg whitespace-nowrap"
+                >
+                  Guardar URL
+                </button>
+              </form>
+            )}
           </div>
 
           <div className="py-3.5 space-y-3">
